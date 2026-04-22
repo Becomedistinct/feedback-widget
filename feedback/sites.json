@@ -1,0 +1,19 @@
+{
+  "sites": {
+    "becomedistinct": {
+      "domain": "becomedistinct.com",
+      "client_email": "vince@becomedistinct.com",
+      "client_name": "Become Distinct"
+    },
+    "test-site": {
+      "domain": "localhost",
+      "client_email": "vince@becomedistinct.com",
+      "client_name": "Test Site"
+    },
+    "example-site": {
+      "domain": "example.com",
+      "client_email": "client@example.com",
+      "client_name": "Example Client"
+    }
+  }
+}

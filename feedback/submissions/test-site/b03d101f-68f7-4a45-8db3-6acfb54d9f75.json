@@ -1,0 +1,10 @@
+{
+  "id": "b03d101f-68f7-4a45-8db3-6acfb54d9f75",
+  "site_id": "test-site",
+  "page_url": "https://localhost:5175/test-page",
+  "user_agent": "TestAgent/1.0",
+  "client_email": "vince@becomedistinct.com",
+  "client_name": "Test Site",
+  "timestamp": 1776262770.6447325,
+  "file_size_bytes": 5120
+}

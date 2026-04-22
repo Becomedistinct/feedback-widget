@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Feedback Widget Test</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 20px;
+      background: #f5f5f5;
+    }
+    h1 {
+      color: #333;
+      margin-bottom: 10px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+    }
+    .section {
+      background: white;
+      padding: 30px;
+      margin-bottom: 20px;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .instructions {
+      background: #f0f8ff;
+      border-left: 4px solid #2563eb;
+      padding: 20px;
+      margin-bottom: 20px;
+      border-radius: 4px;
+    }
+    .code {
+      background: #f1f5f9;
+      padding: 15px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 13px;
+      overflow-x: auto;
+      margin: 15px 0;
+    }
+    button {
+      padding: 10px 20px;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #1d4ed8;
+    }
+    .status {
+      padding: 15px;
+      margin-top: 15px;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    .status.checking {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .status.online {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .status.offline {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎬 Feedback Widget Test</h1>
+  <p class="subtitle">Test the feedback widget on a sample website</p>
+
+  <div class="section">
+    <div class="instructions">
+      <strong>Instructions:</strong> This page tests the feedback widget. Look for the "Feedback" link in the bottom-right corner of this page. Click it to record feedback.
+    </div>
+
+    <h3>Widget Status</h3>
+    <div id="status" class="status checking">
+      Checking service status...
+    </div>
+
+    <h3>Test Steps</h3>
+    <ol>
+      <li>Look for a small "Feedback" link in the bottom-right corner</li>
+      <li>Click it to open the recording panel</li>
+      <li>Click "Start Recording"</li>
+      <li>Grant browser permissions for screen capture and microphone</li>
+      <li>Perform some actions or speak (e.g., "This feedback widget is working great!")</li>
+      <li>Click "Stop & Submit"</li>
+      <li>Wait for upload to complete</li>
+      <li>Verify the feedback appears as a Zoho Desk ticket</li>
+    </ol>
+
+    <h3>Embed Code</h3>
+    <p>To add this widget to your own website, use:</p>
+    <div class="code">&lt;script src="https://feedback-api-production-7e6f.up.railway.app/feedback-widget.js" data-site="your-site-id"&gt;&lt;/script&gt;</div>
+
+    <p>Replace <code>your-site-id</code> with your registered site ID (configured in <code>sites.json</code>).</p>
+
+    <h3>Configuration</h3>
+    <p>Sites must be registered in the backend's <code>sites.json</code> file. For example:</p>
+    <div class="code">{
+  "sites": {
+    "my-website": {
+      "domain": "mywebsite.com",
+      "client_email": "support@mycompany.com",
+      "client_name": "My Company"
+    }
+  }
+}</div>
+
+    <h3>Feedback URL</h3>
+    <p>Service: <code>https://feedback-api-production-7e6f.up.railway.app</code></p>
+    <p>Health Check: <button onclick="checkHealth()">Check Status Now</button></p>
+  </div>
+
+  <div class="section">
+    <h3>Troubleshooting</h3>
+    <ul>
+      <li><strong>No "Feedback" link appears:</strong> The service might not be online yet, or the script tag is not loading correctly.</li>
+      <li><strong>"Chrome only":</strong> The widget uses browser APIs (getDisplayMedia) that are only available in Chromium browsers.</li>
+      <li><strong>Permission denied:</strong> You must grant screen capture and microphone permissions when the browser prompts.</li>
+      <li><strong>Upload fails:</strong> Ensure the backend API is running and accessible.</li>
+    </ul>
+  </div>
+
+  <!-- Widget embed - using test-site configuration -->
+  <script src="https://feedback-api-production-7e6f.up.railway.app/feedback-widget.js" data-site="test-site"></script>
+
+  <script>
+    function checkHealth() {
+      const status = document.getElementById('status');
+      status.className = 'status checking';
+      status.textContent = 'Checking service status...';
+
+      fetch('https://feedback-api-production-7e6f.up.railway.app/api/health')
+        .then(r => r.json())
+        .then(data => {
+          status.className = 'status online';
+          status.innerHTML = `✓ <strong>Service Online</strong><br>Status: ${data.status}`;
+        })
+        .catch(e => {
+          status.className = 'status offline';
+          status.innerHTML = `✗ <strong>Service Offline</strong><br>Error: ${e.message}`;
+        });
+    }
+
+    // Check status on page load
+    window.addEventListener('load', checkHealth);
+  </script>
+</body>
+</html>

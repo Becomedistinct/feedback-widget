@@ -1,0 +1,8 @@
+{
+  "id": "5474125f-960f-4c12-8547-040235e4917c",
+  "site_id": "test-site",
+  "page_url": "https://localhost:5175/test-page",
+  "user_agent": "TestAgent/1.0",
+  "timestamp": 1776262049.4310067,
+  "file_size_bytes": 5120
+}
