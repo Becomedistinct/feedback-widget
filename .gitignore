@@ -1,0 +1,27 @@
+# Node
+node_modules/
+feedback_ui/dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Env
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / recordings (stored in Railway volume)
+feedback/submissions/
+submissions/
+
+# IDE
+.vscode/
+.idea/
