@@ -901,7 +901,7 @@ async def submit_feedback(
                 raise HTTPException(413, "File too large (max 50MB)")
             f.write(chunk)
 
-    logger.info("Saved recording: %s (%.1f MB)", submission_id, total_size / 1024 / 1024)
+    logger.info("Saved recording: %s site=%s (%.1f MB)", submission_id, site_id, total_size / 1024 / 1024)
 
     # Convert .webm to .mp4 for universal playback
     mp4_path = convert_to_mp4(video_path)
@@ -1042,7 +1042,7 @@ async def submit_mobile_feedback(
                 raise HTTPException(413, "File too large (max 50MB)")
             f.write(chunk)
 
-    logger.info("Saved mobile audio: %s (%.1f KB)", submission_id, total_size / 1024)
+    logger.info("Saved mobile audio: %s site=%s (%.1f KB)", submission_id, site_id, total_size / 1024)
 
     # Transcribe audio
     transcript = None
