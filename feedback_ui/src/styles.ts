@@ -17,27 +17,45 @@ export const WIDGET_CSS = `
     padding: 0;
   }
 
+  /* Footer placement (default) */
   .fb-trigger {
-    position: fixed;
-    bottom: 4px;
-    right: 4px;
-    font-size: 9px;
-    color: #bbb;
-    opacity: 0.25;
-    text-decoration: none;
-    cursor: default;
-    z-index: 2147483646;
-    transition: opacity 0.3s, background 0.3s, color 0.3s, padding 0.3s, border-radius 0.3s;
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.55);
     background: none;
     border: none;
+    padding: 0;
+    cursor: pointer;
     font-family: inherit;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.3px;
+    transition: color 0.2s;
+    z-index: 2147483646;
   }
   .fb-trigger:hover {
-    opacity: 0.6;
-    cursor: pointer;
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  /* Fixed placement fallback (no footer found) */
+  :host([data-placement="fixed"]) .fb-trigger {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.45);
+    border-radius: 999px;
+    padding: 6px 14px;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  :host([data-placement="fixed"]) .fb-trigger:hover {
+    background: rgba(0, 0, 0, 0.65);
+  }
+  :host([data-placement="fixed"]) .fb-trigger:active {
+    transform: scale(0.96);
   }
   .fb-trigger.fb-trigger-recording {
+    position: fixed;
     bottom: 16px;
     right: 16px;
     font-size: 13px;

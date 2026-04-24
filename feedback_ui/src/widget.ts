@@ -3,7 +3,7 @@
  * into the host page using Shadow DOM for style isolation.
  *
  * Desktop: screen + mic recording via getDisplayMedia.
- * Mobile: audio + periodic page screenshots via html2canvas.
+ * Mobile: audio only — device/session context is sent at upload time.
  */
 
 import { WIDGET_CSS } from "./styles";
@@ -13,7 +13,6 @@ import {
   stopRecording,
   setStatusCallback,
   isMobileMode,
-  getScreenshots,
   type RecorderState,
 } from "./recorder";
 import { uploadRecording, uploadMobileRecording } from "./uploader";
@@ -36,11 +35,21 @@ function isDesktopRecordingSupported(): boolean {
 export function createWidget(config: WidgetConfig) {
   const desktopMode = isDesktopRecordingSupported();
 
-  // Create Shadow DOM host
+  // Create Shadow DOM host — try to place it in the page footer, fall back to body
   const host = document.createElement("div");
   host.id = "feedback-widget-host";
-  document.body.appendChild(host);
   const shadow = host.attachShadow({ mode: "open" });
+
+  const footerEl = document.querySelector<HTMLElement>(
+    'footer, #colophon, #footer, .site-footer, .footer, [role="contentinfo"]'
+  );
+  if (footerEl) {
+    host.setAttribute("data-placement", "footer");
+    footerEl.appendChild(host);
+  } else {
+    host.setAttribute("data-placement", "fixed");
+    document.body.appendChild(host);
+  }
 
   // Inject styles
   const style = document.createElement("style");
@@ -53,34 +62,26 @@ export function createWidget(config: WidgetConfig) {
   let durationSeconds = 0;
   let uploadPercent = 0;
   let errorMessage = "";
-  let screenshotCount = 0;
+  let submitterEmail = "";
   let overlayMinimized = false;
 
   // DOM references
   const trigger = document.createElement("button");
   trigger.className = "fb-trigger";
   trigger.textContent = "Feedback";
-  trigger.style.display = "none"; // hidden until user scrolls to bottom
   shadow.appendChild(trigger);
 
-  // Show trigger only when user has scrolled to the very bottom of the page.
-  // Uses the max of body/documentElement scrollHeight for cross-browser mobile reliability.
-  function checkScrollBottom() {
-    const scrollTop = window.scrollY || document.documentElement.scrollTop;
-    const windowHeight = window.innerHeight;
-    const docHeight = Math.max(
-      document.body.scrollHeight,
-      document.documentElement.scrollHeight
-    );
-    const isScrollable = docHeight > windowHeight + 100;
-    // Within 60px of the bottom, OR the page is too short to scroll
-    const atBottom = scrollTop + windowHeight >= docHeight - 60;
-    trigger.style.display = (atBottom || !isScrollable) ? "" : "none";
+  // Fixed-mode fallback: show trigger only when near the bottom (scroll depth ≥ 70%)
+  if (!footerEl) {
+    trigger.style.display = "none";
+    function checkScroll() {
+      const scrolled = window.scrollY + window.innerHeight;
+      const total = document.documentElement.scrollHeight;
+      trigger.style.display = total <= window.innerHeight + 100 || scrolled >= total * 0.7 ? "" : "none";
+    }
+    window.addEventListener("scroll", checkScroll, { passive: true });
+    checkScroll();
   }
-  window.addEventListener("scroll", checkScrollBottom, { passive: true });
-  window.addEventListener("resize", checkScrollBottom, { passive: true });
-  // Check on load in case page is already at bottom (short pages)
-  checkScrollBottom();
 
   const overlay = document.createElement("div");
   overlay.className = "fb-overlay";
@@ -90,12 +91,10 @@ export function createWidget(config: WidgetConfig) {
   setStatusCallback((state: RecorderState) => {
     if (state.status === "recording") {
       durationSeconds = state.durationSeconds;
-      screenshotCount = state.screenshotCount || 0;
       setUIState("recording");
     } else if (state.status === "stopped" && state.blob) {
       recordingBlob = state.blob;
       durationSeconds = state.durationSeconds;
-      screenshotCount = state.screenshotCount || 0;
       // When recording stops, un-minimize and show upload progress
       overlayMinimized = false;
       overlay.classList.add("open");
@@ -120,8 +119,6 @@ export function createWidget(config: WidgetConfig) {
     } else {
       trigger.classList.remove("fb-trigger-recording");
       trigger.textContent = "Feedback";
-      // Re-apply scroll visibility logic for non-recording states
-      checkScrollBottom();
     }
     render();
   }
@@ -202,13 +199,13 @@ export function createWidget(config: WidgetConfig) {
         "Your browser will ask permission to capture your screen and microphone.";
       overlay.appendChild(desc);
     } else {
-      // Mobile: explain audio + screenshots mode
+      // Mobile: audio + device context
       const desc = document.createElement("p");
       desc.className = "fb-desc";
       desc.textContent =
-        "On mobile, we'll record your voice and automatically capture " +
-        "screenshots of the page as you scroll. Navigate the page and talk " +
-        "through your feedback — we'll capture what you're looking at.";
+        "We'll record your voice along with details about your device and " +
+        "the page you're viewing. Talk through your feedback and we'll send " +
+        "everything to the support team.";
       overlay.appendChild(desc);
 
       const desc2 = document.createElement("p");
@@ -217,6 +214,29 @@ export function createWidget(config: WidgetConfig) {
         "Your browser will ask permission to use your microphone.";
       overlay.appendChild(desc2);
     }
+
+    const emailWrap = document.createElement("div");
+    emailWrap.style.cssText = "margin-bottom:16px";
+
+    const emailLabel = document.createElement("label");
+    emailLabel.style.cssText = "display:block;font-size:12px;font-weight:500;color:#374151;margin-bottom:4px";
+    emailLabel.textContent = "Your email (optional)";
+    emailWrap.appendChild(emailLabel);
+
+    const emailInput = document.createElement("input");
+    emailInput.type = "email";
+    emailInput.placeholder = "you@example.com";
+    emailInput.value = submitterEmail;
+    emailInput.style.cssText = "width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;font-family:inherit;box-sizing:border-box";
+    emailInput.oninput = () => { submitterEmail = emailInput.value.trim(); };
+    emailWrap.appendChild(emailInput);
+
+    const emailHint = document.createElement("p");
+    emailHint.style.cssText = "font-size:12px;color:#9ca3af;margin-top:4px";
+    emailHint.textContent = "Website owner? Leave this blank — we already have your details. Anyone else who'd like a notification when this is addressed, enter your email here.";
+    emailWrap.appendChild(emailHint);
+
+    overlay.appendChild(emailWrap);
 
     const btn = document.createElement("button");
     btn.className = "fb-btn fb-btn-primary";
@@ -250,13 +270,6 @@ export function createWidget(config: WidgetConfig) {
     indicator.appendChild(timer);
     overlay.appendChild(indicator);
 
-    if (!desktopMode) {
-      // Mobile: show screenshot count
-      const ssInfo = document.createElement("p");
-      ssInfo.className = "fb-desc";
-      ssInfo.textContent = `${screenshotCount} screenshot${screenshotCount !== 1 ? "s" : ""} captured — scroll the page to capture different areas.`;
-      overlay.appendChild(ssInfo);
-    }
 
     const desc = document.createElement("p");
     desc.className = "fb-desc";
@@ -365,22 +378,14 @@ export function createWidget(config: WidgetConfig) {
     };
 
     try {
-      if (isMobileMode()) {
-        await uploadMobileRecording({
-          blob: recordingBlob,
-          screenshots: getScreenshots(),
-          siteId: config.siteId,
-          apiBase: config.apiBase,
-          onProgress,
-        });
-      } else {
-        await uploadRecording({
-          blob: recordingBlob,
-          siteId: config.siteId,
-          apiBase: config.apiBase,
-          onProgress,
-        });
-      }
+      const uploadFn = isMobileMode() ? uploadMobileRecording : uploadRecording;
+      await uploadFn({
+        blob: recordingBlob,
+        siteId: config.siteId,
+        apiBase: config.apiBase,
+        onProgress,
+        submitterEmail,
+      });
       setUIState("done");
     } catch (err) {
       errorMessage =
@@ -394,7 +399,7 @@ export function createWidget(config: WidgetConfig) {
     durationSeconds = 0;
     uploadPercent = 0;
     errorMessage = "";
-    screenshotCount = 0;
+    submitterEmail = "";
     uiState = "idle";
   }
 

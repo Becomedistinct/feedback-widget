@@ -15,22 +15,34 @@ import { createWidget } from "./widget";
 declare global {
   interface Window {
     __feedbackWidgetConfig?: { siteId: string; apiBase: string };
+    feedbackWidgetConfig?: { siteId: string; apiBase: string };
   }
 }
 
 function init() {
-  // Check for global config first (set before script loads), then fall back to data attributes
-  if (window.__feedbackWidgetConfig) {
-    createWidget(window.__feedbackWidgetConfig);
+  // Check for global config first (set before script loads, either naming convention)
+  const globalCfg = window.__feedbackWidgetConfig || window.feedbackWidgetConfig;
+  if (globalCfg) {
+    createWidget(globalCfg);
     return;
   }
 
   const scriptTag =
     document.currentScript ||
-    document.querySelector('script[data-site][src*="feedback"]');
+    document.querySelector('script[data-site][src*="feedback"]') ||
+    document.querySelector('script[src*="feedback-widget"]');
 
   const siteId = scriptTag?.getAttribute("data-site") || "default";
-  const apiBase = scriptTag?.getAttribute("data-api") || "";
+  const explicitApi = scriptTag?.getAttribute("data-api") || "";
+  const srcAttr = scriptTag?.getAttribute("src") || "";
+  let apiBase = explicitApi;
+  if (!apiBase && srcAttr) {
+    try {
+      apiBase = new URL(srcAttr, window.location.href).origin;
+    } catch {
+      apiBase = "";
+    }
+  }
 
   createWidget({ siteId, apiBase });
 }

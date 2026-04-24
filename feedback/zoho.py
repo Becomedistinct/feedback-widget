@@ -56,7 +56,6 @@ async def create_ticket(
     payload: dict = {
         "subject": subject,
         "description": description,
-        "descriptionType": "html",
         "departmentId": department_id,
         "channel": "Web",
         "contact": {

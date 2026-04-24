@@ -3,7 +3,7 @@ Feedback Recorder — FastAPI backend
 Receives screen recordings from the widget and creates Zoho Desk tickets
 with MP4 video attachment and audio transcription.
 """
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Depends
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
@@ -20,6 +20,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv(Path(__file__).parent / ".env")
+
+import asyncio
+import resend
 
 try:
     from feedback.zoho import create_ticket, attach_file
@@ -58,14 +61,30 @@ async def serve_widget():
     js_path = STATIC_DIR / "feedback-widget.js"
     if not js_path.exists():
         raise HTTPException(404, "Widget not built yet")
-    return FileResponse(js_path, media_type="application/javascript")
+    return FileResponse(
+        js_path,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
+ADMIN_KEY = os.getenv("ADMIN_KEY", "")
+
+
+def require_admin(request: Request):
+    key = request.headers.get("X-Admin-Key") or request.query_params.get("key", "")
+    if not ADMIN_KEY or key != ADMIN_KEY:
+        raise HTTPException(403, "Invalid or missing admin key")
 
 
 def load_sites() -> dict:
-    """Load the site registry. Re-reads on each call so edits take effect without restart."""
     if SITES_FILE.exists():
         return json.loads(SITES_FILE.read_text()).get("sites", {})
     return {}
+
+
+def save_sites(sites: dict) -> None:
+    SITES_FILE.write_text(json.dumps({"sites": sites}, indent=2))
 
 
 @app.get("/api/health")
@@ -74,9 +93,231 @@ async def health():
 
 
 @app.get("/api/feedback/sites")
-async def list_sites():
-    """List all registered sites."""
+async def list_sites_public():
     return load_sites()
+
+
+# ---------------------------------------------------------------------------
+# Admin: sites CRUD
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/sites", dependencies=[Depends(require_admin)])
+async def admin_list_sites():
+    return load_sites()
+
+
+@app.post("/api/admin/sites", dependencies=[Depends(require_admin)])
+async def admin_create_site(
+    site_id: str = Form(...),
+    client_name: str = Form(...),
+    client_email: str = Form(...),
+):
+    sites = load_sites()
+    if site_id in sites:
+        raise HTTPException(400, f"Site '{site_id}' already exists")
+    sites[site_id] = {"client_name": client_name, "client_email": client_email}
+    save_sites(sites)
+    return {"site_id": site_id, **sites[site_id]}
+
+
+@app.put("/api/admin/sites/{site_id}", dependencies=[Depends(require_admin)])
+async def admin_update_site(
+    site_id: str,
+    client_name: str = Form(...),
+    client_email: str = Form(...),
+):
+    sites = load_sites()
+    if site_id not in sites:
+        raise HTTPException(404, f"Site '{site_id}' not found")
+    sites[site_id] = {"client_name": client_name, "client_email": client_email}
+    save_sites(sites)
+    return {"site_id": site_id, **sites[site_id]}
+
+
+@app.delete("/api/admin/sites/{site_id}", dependencies=[Depends(require_admin)])
+async def admin_delete_site(site_id: str):
+    sites = load_sites()
+    if site_id not in sites:
+        raise HTTPException(404, f"Site '{site_id}' not found")
+    del sites[site_id]
+    save_sites(sites)
+    return {"deleted": site_id}
+
+
+# ---------------------------------------------------------------------------
+# Admin UI
+# ---------------------------------------------------------------------------
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_ui():
+    return HTMLResponse("""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Feedback Widget — Admin</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f9fafb;color:#111827;padding:32px 16px}
+  .wrap{max-width:720px;margin:0 auto}
+  h1{font-size:22px;font-weight:700;margin-bottom:4px}
+  .sub{color:#6b7280;font-size:14px;margin-bottom:32px}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:24px;margin-bottom:24px}
+  h2{font-size:15px;font-weight:600;margin-bottom:16px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th{text-align:left;padding:8px 10px;background:#f3f4f6;color:#6b7280;font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  td{padding:10px 10px;border-top:1px solid #f3f4f6;vertical-align:middle}
+  .actions{display:flex;gap:8px}
+  input{width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;font-family:inherit}
+  input:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+  .btn{padding:7px 14px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit}
+  .btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
+  .btn-danger{background:#fee2e2;color:#dc2626}.btn-danger:hover{background:#fecaca}
+  .btn-sm{padding:5px 10px;font-size:12px}
+  .form-row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
+  label{display:block;font-size:12px;font-weight:500;color:#374151;margin-bottom:4px}
+  .auth-wrap{max-width:360px;margin:80px auto;text-align:center}
+  .auth-wrap h1{margin-bottom:8px}
+  .auth-wrap p{color:#6b7280;font-size:14px;margin-bottom:24px}
+  .auth-wrap input{margin-bottom:12px}
+  #error{color:#dc2626;font-size:13px;margin-top:8px;display:none}
+  .empty{color:#9ca3af;font-size:14px;padding:16px 10px}
+  .editing td{background:#eff6ff}
+</style>
+</head>
+<body>
+
+<div id="auth-screen" class="auth-wrap">
+  <h1>Admin</h1>
+  <p>Enter your admin key to continue.</p>
+  <input type="password" id="key-input" placeholder="Admin key" autocomplete="current-password">
+  <button class="btn btn-primary" style="width:100%" onclick="login()">Sign in</button>
+  <div id="error">Incorrect key</div>
+</div>
+
+<div id="app" class="wrap" style="display:none">
+  <h1>Feedback Widget</h1>
+  <p class="sub">Manage registered sites and their contact emails.</p>
+
+  <div class="card">
+    <h2>Add Site</h2>
+    <div class="form-row">
+      <div><label>Site ID</label><input id="new-id" placeholder="becomedistinct"></div>
+      <div><label>Client Name</label><input id="new-name" placeholder="BecomDistinct"></div>
+      <div><label>Client Email</label><input id="new-email" type="email" placeholder="client@example.com"></div>
+      <div style="padding-bottom:1px"><button class="btn btn-primary" onclick="addSite()">Add</button></div>
+    </div>
+    <div id="add-error" style="color:#dc2626;font-size:13px;margin-top:8px;display:none"></div>
+  </div>
+
+  <div class="card">
+    <h2>Registered Sites</h2>
+    <table>
+      <thead><tr><th>Site ID</th><th>Client Name</th><th>Client Email</th><th></th></tr></thead>
+      <tbody id="sites-tbody"><tr><td class="empty" colspan="4">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let adminKey = '';
+
+function login() {
+  const key = document.getElementById('key-input').value.trim();
+  if (!key) return;
+  adminKey = key;
+  fetch('/api/admin/sites', { headers: { 'X-Admin-Key': key } })
+    .then(r => {
+      if (r.status === 403) throw new Error('bad key');
+      return r.json();
+    })
+    .then(data => {
+      document.getElementById('auth-screen').style.display = 'none';
+      document.getElementById('app').style.display = '';
+      renderSites(data);
+    })
+    .catch(() => {
+      document.getElementById('error').style.display = 'block';
+    });
+}
+
+document.getElementById('key-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') login();
+});
+
+function renderSites(sites) {
+  const tbody = document.getElementById('sites-tbody');
+  const entries = Object.entries(sites);
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td class="empty" colspan="4">No sites yet — add one above.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(([id, s]) => `
+    <tr id="row-${id}">
+      <td><code style="font-size:13px">${id}</code></td>
+      <td id="name-${id}">${s.client_name}</td>
+      <td id="email-${id}">${s.client_email}</td>
+      <td><div class="actions">
+        <button class="btn btn-sm btn-primary" onclick="startEdit('${id}','${s.client_name}','${s.client_email}')">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteSite('${id}')">Delete</button>
+      </div></td>
+    </tr>`).join('');
+}
+
+function startEdit(id, name, email) {
+  const row = document.getElementById('row-' + id);
+  row.classList.add('editing');
+  document.getElementById('name-' + id).innerHTML = `<input id="edit-name-${id}" value="${name}" style="min-width:140px">`;
+  document.getElementById('email-' + id).innerHTML = `<input id="edit-email-${id}" type="email" value="${email}" style="min-width:180px">`;
+  row.querySelector('.actions').innerHTML = `
+    <button class="btn btn-sm btn-primary" onclick="saveEdit('${id}')">Save</button>
+    <button class="btn btn-sm" style="background:#f3f4f6" onclick="loadSites()">Cancel</button>`;
+}
+
+function saveEdit(id) {
+  const name  = document.getElementById('edit-name-' + id).value.trim();
+  const email = document.getElementById('edit-email-' + id).value.trim();
+  if (!name || !email) return;
+  const form = new FormData();
+  form.append('client_name', name);
+  form.append('client_email', email);
+  fetch('/api/admin/sites/' + id, { method: 'PUT', headers: { 'X-Admin-Key': adminKey }, body: form })
+    .then(r => r.json()).then(() => loadSites());
+}
+
+function deleteSite(id) {
+  if (!confirm('Delete site "' + id + '"? This cannot be undone.')) return;
+  fetch('/api/admin/sites/' + id, { method: 'DELETE', headers: { 'X-Admin-Key': adminKey } })
+    .then(() => loadSites());
+}
+
+function addSite() {
+  const id    = document.getElementById('new-id').value.trim();
+  const name  = document.getElementById('new-name').value.trim();
+  const email = document.getElementById('new-email').value.trim();
+  const errEl = document.getElementById('add-error');
+  errEl.style.display = 'none';
+  if (!id || !name || !email) { errEl.textContent = 'All fields are required.'; errEl.style.display = 'block'; return; }
+  const form = new FormData();
+  form.append('site_id', id); form.append('client_name', name); form.append('client_email', email);
+  fetch('/api/admin/sites', { method: 'POST', headers: { 'X-Admin-Key': adminKey }, body: form })
+    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
+    .then(() => {
+      document.getElementById('new-id').value = '';
+      document.getElementById('new-name').value = '';
+      document.getElementById('new-email').value = '';
+      loadSites();
+    })
+    .catch(msg => { errEl.textContent = msg || 'Error adding site.'; errEl.style.display = 'block'; });
+}
+
+function loadSites() {
+  fetch('/api/admin/sites', { headers: { 'X-Admin-Key': adminKey } })
+    .then(r => r.json()).then(renderSites);
+}
+</script>
+</body>
+</html>""")
 
 
 @app.get("/api/feedback/recordings")
@@ -292,11 +533,12 @@ def build_ticket_description(
     submission_id: str,
     transcript: str | None,
     mode: str = "desktop",
-    screenshot_count: int = 0,
+    device_ctx: dict | None = None,
 ) -> str:
     """Build a clean HTML ticket description for Zoho Desk."""
     playback_url = f"{BASE_URL}/api/feedback/recordings/{submission_id}/view"
     submitted_at = time.strftime("%B %d, %Y at %H:%M UTC", time.gmtime())
+    ctx = device_ctx or {}
 
     transcript_html = (
         f"<p>{transcript}</p>"
@@ -307,13 +549,38 @@ def build_ticket_description(
     recording_section = (
         f'<p><a href="{playback_url}">▶ Watch Recording</a></p>'
         if mode == "desktop"
-        else f"<p>{screenshot_count} screenshots attached below.</p>"
+        else f'<p><a href="{playback_url}">▶ Listen to Audio</a></p>'
     )
 
     size_str = (
         f"{total_size / 1024 / 1024:.1f} MB"
         if total_size > 1024 * 1024
         else f"{total_size / 1024:.0f} KB"
+    )
+
+    # Device / session rows (only include non-empty values)
+    def row(label: str, value: str) -> str:
+        return f'  <tr><td><strong>{label}</strong></td><td>{value}</td></tr>\n' if value else ""
+
+    scroll = ctx.get("scroll_pos", "")
+    scroll_fmt = f"{scroll} px" if scroll else ""
+    screen = ctx.get("screen_size", "")
+    dpr = ctx.get("pixel_ratio", "")
+    screen_fmt = f"{screen}  ({dpr}× DPR)" if screen and dpr else screen
+    device = ctx.get("device_model", "")
+    os_plat = ctx.get("os_platform", "")
+    os_ver = ctx.get("os_version", "")
+    device_fmt = " · ".join(filter(None, [device, os_plat, os_ver]))
+
+    device_rows = (
+        row("Page title",  ctx.get("page_title", ""))
+        + row("Scroll pos",  scroll_fmt)
+        + row("Screen",      screen_fmt)
+        + row("Viewport",    ctx.get("viewport_size", ""))
+        + row("Device",      device_fmt)
+        + row("Language",    ctx.get("language", ""))
+        + row("Timezone",    ctx.get("timezone", ""))
+        + row("Network",     ctx.get("network_type", ""))
     )
 
     return f"""<h2>What they said</h2>
@@ -324,12 +591,224 @@ def build_ticket_description(
 
 <h2>Details</h2>
 <table>
-  <tr><td><strong>Page</strong></td><td><a href="{page_url}">{page_url}</a></td></tr>
+{row("Page", f'<a href="{page_url}">{page_url}</a>')}
   <tr><td><strong>Client</strong></td><td>{client_name}</td></tr>
   <tr><td><strong>Submitted</strong></td><td>{submitted_at}</td></tr>
   <tr><td><strong>File size</strong></td><td>{size_str}</td></tr>
+{device_rows}  <tr><td><strong>User agent</strong></td><td>{user_agent}</td></tr>
   <tr><td><strong>Submission ID</strong></td><td>{submission_id}</td></tr>
 </table>"""
+
+
+NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL", "vince@becomedistinct.com")
+NOTIFY_FROM  = os.getenv("NOTIFY_FROM",  "Feedback Widget <assist@becomedistinct.com>")
+
+
+def _resend_send(subject: str, html: str, to: str) -> None:
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        logger.error("RESEND_API_KEY not set — cannot send email")
+        return
+    resend.api_key = api_key
+    try:
+        resend.Emails.send({
+            "from": NOTIFY_FROM,
+            "to": [to],
+            "subject": subject,
+            "html": html,
+        })
+        logger.info("Email sent to %s: %s", to, subject)
+    except Exception as e:
+        logger.error("Resend email failed: %s", e)
+
+
+async def _send_email(subject: str, html: str, to: str | None = None) -> None:
+    await asyncio.to_thread(_resend_send, subject, html, to or NOTIFY_EMAIL)
+
+
+async def send_client_success_email(submission_id: str, meta: dict) -> None:
+    """Tell the client their feedback was received and a ticket created."""
+    client_name  = meta.get("client_name", meta.get("site_id", "unknown"))
+    client_email = meta.get("submitter_email") or meta.get("client_email", "")
+    if not client_email:
+        return
+    page_url     = meta.get("page_url", "")
+    transcript   = (meta.get("transcript") or "").strip()
+    mode         = meta.get("mode", "desktop")
+    playback_url = f"{BASE_URL}/api/feedback/recordings/{submission_id}/view"
+    submitted_at = time.strftime("%B %d, %Y at %H:%M UTC", time.gmtime())
+
+    transcript_html = (
+        f"<p style='color:#374151;line-height:1.6'>{transcript[:600]}{'…' if len(transcript) > 600 else ''}</p>"
+        if transcript else "<p style='color:#9ca3af;font-style:italic'>No speech detected.</p>"
+    )
+    media_label = "Watch Recording" if mode == "desktop" else "Listen to Audio"
+
+    html = f"""
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111827">
+  <h2 style="margin:0 0 4px;font-size:20px">Your feedback was received</h2>
+  <p style="margin:0 0 24px;color:#6b7280;font-size:14px">{submitted_at}</p>
+  <p style="margin:0 0 20px;line-height:1.6">Hi {client_name},<br><br>
+  Thanks for submitting feedback. A support ticket has been created and our team will review it shortly.</p>
+
+  <h3 style="font-size:13px;font-weight:600;color:#374151;margin:0 0 8px;text-transform:uppercase;letter-spacing:.05em">What you said</h3>
+  {transcript_html}
+
+  <table style="width:100%;border-collapse:collapse;font-size:14px;margin:20px 0">
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280;white-space:nowrap">Page</td>
+        <td style="padding:4px 0"><a href="{page_url}" style="color:#2563eb">{page_url}</a></td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280;white-space:nowrap">Submission</td>
+        <td style="padding:4px 0;font-family:monospace;font-size:12px">{submission_id}</td></tr>
+  </table>
+
+  <a href="{playback_url}" style="display:inline-block;background:#2563eb;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:500">▶ {media_label}</a>
+</div>"""
+
+    await _send_email(f"Feedback received — {client_name}", html, to=client_email)
+
+
+async def send_client_failure_email(submission_id: str, meta: dict) -> None:
+    """Tell the client their recording was saved but the ticket had an issue."""
+    client_name  = meta.get("client_name", meta.get("site_id", "unknown"))
+    client_email = meta.get("submitter_email") or meta.get("client_email", "")
+    if not client_email:
+        return
+    submitted_at = time.strftime("%B %d, %Y at %H:%M UTC", time.gmtime())
+
+    html = f"""
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111827">
+  <h2 style="margin:0 0 4px;font-size:20px">We received your feedback</h2>
+  <p style="margin:0 0 24px;color:#6b7280;font-size:14px">{submitted_at}</p>
+  <p style="line-height:1.6">Hi {client_name},<br><br>
+  Your feedback recording was saved successfully. We ran into a minor technical issue creating your support ticket,
+  but our team has been notified and will follow up with you directly.</p>
+  <p style="margin-top:16px;color:#6b7280;font-size:13px">Reference: <code>{submission_id}</code></p>
+</div>"""
+
+    await _send_email(f"Feedback received — {client_name}", html, to=client_email)
+
+
+async def send_desk_failure_alert(submission_id: str, error: str, meta: dict) -> None:
+    """Alert the desk when Zoho ticket creation fails — technical details + retry."""
+    client_name  = meta.get("client_name", meta.get("site_id", "unknown"))
+    page_url     = meta.get("page_url", "")
+    playback_url = f"{BASE_URL}/api/feedback/recordings/{submission_id}/view"
+    retry_url    = f"{BASE_URL}/api/admin/retry/{submission_id}"
+
+    html = f"""
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111827">
+  <h2 style="margin:0 0 4px;font-size:20px;color:#dc2626">⚠️ Zoho Ticket Failed</h2>
+  <p style="margin:0 0 24px;color:#6b7280;font-size:14px">A submission was saved but the Zoho Desk ticket could not be created.</p>
+  <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280;white-space:nowrap">Client</td><td style="padding:4px 0">{client_name}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280;white-space:nowrap">Page</td><td style="padding:4px 0"><a href="{page_url}" style="color:#2563eb">{page_url}</a></td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280;white-space:nowrap">Error</td><td style="padding:4px 0;color:#dc2626;font-family:monospace;font-size:12px">{error[:300]}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280;white-space:nowrap">Submission ID</td><td style="padding:4px 0;font-family:monospace;font-size:12px">{submission_id}</td></tr>
+  </table>
+  <a href="{playback_url}" style="display:inline-block;background:#2563eb;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:500;margin-right:12px">View Recording</a>
+  <a href="{retry_url}" style="display:inline-block;background:#dc2626;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:500">Retry Zoho</a>
+</div>"""
+
+    await _send_email(f"⚠️ Zoho Failed — {client_name}", html)
+
+
+# Keep old name as alias so existing calls still work during transition
+async def send_alert_email(submission_id: str, error: str, meta: dict) -> None:
+    await send_desk_failure_alert(submission_id, error, meta)
+
+
+def mark_zoho_failed(meta_path: Path, meta: dict, error: str) -> None:
+    """Stamp the metadata file so failed submissions are easy to find."""
+    meta["zoho_failed"] = True
+    meta["zoho_error_detail"] = error
+    meta["zoho_failed_at"] = time.time()
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+
+@app.get("/api/admin/failed-submissions")
+async def list_failed_submissions():
+    """Return all submissions where Zoho ticket creation failed."""
+    failed = []
+    for site_dir in sorted(SUBMISSIONS_DIR.iterdir()):
+        if not site_dir.is_dir():
+            continue
+        for meta_file in sorted(site_dir.glob("*.json"), reverse=True):
+            try:
+                meta = json.loads(meta_file.read_text())
+                if meta.get("zoho_failed"):
+                    meta["playback_url"] = f"{BASE_URL}/api/feedback/recordings/{meta['id']}/view"
+                    failed.append(meta)
+            except Exception:
+                continue
+    return {"count": len(failed), "submissions": failed}
+
+
+@app.post("/api/admin/retry/{submission_id}")
+async def retry_zoho(submission_id: str):
+    """Re-attempt Zoho ticket creation for a failed submission."""
+    result = _find_submission(submission_id)
+    if not result:
+        raise HTTPException(404, "Submission not found")
+    site_dir, meta = result
+    meta_path = site_dir / f"{submission_id}.json"
+
+    if not meta.get("zoho_failed") and meta.get("ticket_id"):
+        return {"status": "already_posted", "ticket_id": meta["ticket_id"]}
+
+    mode = meta.get("mode", "desktop")
+    transcript = meta.get("transcript")
+    device_ctx = {
+        k: meta.get(k, "")
+        for k in ("page_title", "scroll_pos", "screen_size", "viewport_size",
+                  "pixel_ratio", "language", "timezone", "network_type",
+                  "device_model", "os_platform", "os_version")
+    }
+
+    description = build_ticket_description(
+        client_name=meta.get("client_name", meta.get("site_id", "")),
+        site_id=meta["site_id"],
+        page_url=meta.get("page_url", ""),
+        user_agent=meta.get("user_agent", ""),
+        total_size=meta.get("file_size_bytes", 0),
+        submission_id=submission_id,
+        transcript=transcript,
+        mode=mode,
+        device_ctx=device_ctx,
+    )
+
+    subject_prefix = "Mobile Feedback" if mode == "mobile" else "Screen Feedback"
+    ticket_id = None
+    error = None
+    try:
+        ticket_id = await create_ticket(
+            subject=f"{subject_prefix} — {meta.get('client_name', meta['site_id'])}",
+            description=description,
+            contact_email=meta["client_email"],
+        )
+        logger.info("Retry: created Zoho ticket %s for submission %s", ticket_id, submission_id)
+
+        # Try to attach media
+        attach_candidates = [
+            site_dir / f"{submission_id}.mp4",
+            site_dir / f"{submission_id}.webm",
+        ]
+        for path in attach_candidates:
+            if path.exists():
+                try:
+                    await attach_file(ticket_id, path)
+                except Exception as e:
+                    logger.warning("Retry attachment failed: %s", e)
+                break
+
+        # Clear failed flag
+        meta["zoho_failed"] = False
+        meta["ticket_id"] = ticket_id
+        meta_path.write_text(json.dumps(meta, indent=2))
+    except Exception as e:
+        error = str(e)
+        logger.error("Retry failed for %s: %s", submission_id, e)
+
+    return {"submission_id": submission_id, "ticket_id": ticket_id, "error": error}
 
 
 @app.post("/api/feedback/submit")
@@ -338,6 +817,18 @@ async def submit_feedback(
     site_id: str = Form(...),
     page_url: str = Form(""),
     user_agent: str = Form(""),
+    submitter_email: str = Form(""),
+    page_title: str = Form(""),
+    scroll_pos: str = Form(""),
+    screen_size: str = Form(""),
+    viewport_size: str = Form(""),
+    pixel_ratio: str = Form(""),
+    language: str = Form(""),
+    timezone: str = Form(""),
+    network_type: str = Form(""),
+    device_model: str = Form(""),
+    os_platform: str = Form(""),
+    os_version: str = Form(""),
 ):
     # Look up site config for client email
     sites = load_sites()
@@ -380,6 +871,15 @@ async def submit_feedback(
     except Exception as e:
         logger.warning("Transcription failed: %s", e)
 
+    device_ctx = {
+        "page_title": page_title, "scroll_pos": scroll_pos,
+        "screen_size": screen_size, "viewport_size": viewport_size,
+        "pixel_ratio": pixel_ratio, "language": language,
+        "timezone": timezone, "network_type": network_type,
+        "device_model": device_model, "os_platform": os_platform,
+        "os_version": os_version,
+    }
+
     # Save metadata (including transcript)
     meta = {
         "id": submission_id,
@@ -392,6 +892,8 @@ async def submit_feedback(
         "file_size_bytes": total_size,
         "transcript": transcript,
         "has_mp4": mp4_path is not None,
+        "submitter_email": submitter_email,
+        **device_ctx,
     }
     meta_path = site_dir / f"{submission_id}.json"
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -406,6 +908,7 @@ async def submit_feedback(
         submission_id=submission_id,
         transcript=transcript,
         mode="desktop",
+        device_ctx=device_ctx,
     )
 
     # Create Zoho Desk ticket with attachment
@@ -417,10 +920,18 @@ async def submit_feedback(
             description=description,
             contact_email=client_email,
         )
+        meta["ticket_id"] = ticket_id
+        meta_path.write_text(json.dumps(meta, indent=2))
         logger.info("Created Zoho ticket: %s", ticket_id)
+        await send_client_success_email(submission_id, meta)
     except Exception as e:
         logger.error("Zoho ticket creation failed: %s", e)
         zoho_error = f"Ticket creation: {e}"
+        mark_zoho_failed(meta_path, meta, zoho_error)
+        await asyncio.gather(
+            send_desk_failure_alert(submission_id, zoho_error, meta),
+            send_client_failure_email(submission_id, meta),
+        )
 
     # Attach video file separately (so ticket exists even if attachment fails)
     if ticket_id:
@@ -430,6 +941,8 @@ async def submit_feedback(
         except Exception as e:
             logger.error("Zoho attachment failed: %s", e)
             zoho_error = f"Attachment: {e}"
+            mark_zoho_failed(meta_path, meta, zoho_error)
+            await send_desk_failure_alert(submission_id, zoho_error, meta)
 
     return JSONResponse({
         "submission_id": submission_id,
@@ -441,14 +954,24 @@ async def submit_feedback(
 
 @app.post("/api/feedback/submit-mobile")
 async def submit_mobile_feedback(
-    request: Request,
     audio: UploadFile = File(...),
     site_id: str = Form(...),
     page_url: str = Form(""),
     user_agent: str = Form(""),
+    submitter_email: str = Form(""),
+    page_title: str = Form(""),
+    scroll_pos: str = Form(""),
+    screen_size: str = Form(""),
+    viewport_size: str = Form(""),
+    pixel_ratio: str = Form(""),
+    language: str = Form(""),
+    timezone: str = Form(""),
+    network_type: str = Form(""),
+    device_model: str = Form(""),
+    os_platform: str = Form(""),
+    os_version: str = Form(""),
 ):
-    """Mobile feedback: audio recording + page screenshots."""
-    # Look up site config
+    """Mobile feedback: audio recording + device/session context."""
     sites = load_sites()
     site_config = sites.get(site_id)
     if not site_config:
@@ -474,19 +997,6 @@ async def submit_mobile_feedback(
 
     logger.info("Saved mobile audio: %s (%.1f KB)", submission_id, total_size / 1024)
 
-    # Save screenshots from multipart form
-    form = await request.form()
-    screenshot_paths = []
-    for i, (key, field) in enumerate(form.multi_items()):
-        if key == "screenshots" and hasattr(field, "read"):
-            ss_path = site_dir / f"{submission_id}_ss_{i:03d}.jpg"
-            content = await field.read()
-            ss_path.write_bytes(content)
-            screenshot_paths.append(ss_path)
-            logger.info("Saved screenshot %d: %.1f KB", i, len(content) / 1024)
-
-    logger.info("Mobile submission %s: %d screenshots", submission_id, len(screenshot_paths))
-
     # Transcribe audio
     transcript = None
     try:
@@ -497,6 +1007,15 @@ async def submit_mobile_feedback(
             logger.info("No speech detected in audio")
     except Exception as e:
         logger.warning("Transcription failed: %s", e)
+
+    device_ctx = {
+        "page_title": page_title, "scroll_pos": scroll_pos,
+        "screen_size": screen_size, "viewport_size": viewport_size,
+        "pixel_ratio": pixel_ratio, "language": language,
+        "timezone": timezone, "network_type": network_type,
+        "device_model": device_model, "os_platform": os_platform,
+        "os_version": os_version,
+    }
 
     # Save metadata
     meta = {
@@ -510,7 +1029,8 @@ async def submit_mobile_feedback(
         "file_size_bytes": total_size,
         "transcript": transcript,
         "mode": "mobile",
-        "screenshot_count": len(screenshot_paths),
+        "submitter_email": submitter_email,
+        **device_ctx,
     }
     meta_path = site_dir / f"{submission_id}.json"
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -525,7 +1045,7 @@ async def submit_mobile_feedback(
         submission_id=submission_id,
         transcript=transcript,
         mode="mobile",
-        screenshot_count=len(screenshot_paths),
+        device_ctx=device_ctx,
     )
 
     # Create Zoho Desk ticket
@@ -537,21 +1057,29 @@ async def submit_mobile_feedback(
             description=description,
             contact_email=client_email,
         )
+        meta["ticket_id"] = ticket_id
+        meta_path.write_text(json.dumps(meta, indent=2))
         logger.info("Created Zoho ticket: %s", ticket_id)
+        await send_client_success_email(submission_id, meta)
     except Exception as e:
         logger.error("Zoho ticket creation failed: %s", e)
         zoho_error = f"Ticket creation: {e}"
+        mark_zoho_failed(meta_path, meta, zoho_error)
+        await asyncio.gather(
+            send_desk_failure_alert(submission_id, zoho_error, meta),
+            send_client_failure_email(submission_id, meta),
+        )
 
-    # Attach screenshots to ticket
+    # Attach audio to ticket
     if ticket_id:
-        for ss_path in screenshot_paths:
-            try:
-                await attach_file(ticket_id, ss_path)
-                logger.info("Attached screenshot %s to ticket %s", ss_path.name, ticket_id)
-            except Exception as e:
-                logger.error("Screenshot attachment failed: %s", e)
-                if not zoho_error:
-                    zoho_error = f"Screenshot attachment: {e}"
+        try:
+            await attach_file(ticket_id, audio_path)
+            logger.info("Attached audio to ticket %s", ticket_id)
+        except Exception as e:
+            logger.error("Audio attachment failed: %s", e)
+            zoho_error = f"Attachment: {e}"
+            mark_zoho_failed(meta_path, meta, zoho_error)
+            await send_desk_failure_alert(submission_id, zoho_error, meta)
 
     return JSONResponse({
         "submission_id": submission_id,
