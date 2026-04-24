@@ -71,17 +71,6 @@ export function createWidget(config: WidgetConfig) {
   trigger.textContent = "Feedback";
   shadow.appendChild(trigger);
 
-  // Fixed-mode fallback: show trigger only when near the bottom (scroll depth ≥ 70%)
-  if (!footerEl) {
-    trigger.style.display = "none";
-    function checkScroll() {
-      const scrolled = window.scrollY + window.innerHeight;
-      const total = document.documentElement.scrollHeight;
-      trigger.style.display = total <= window.innerHeight + 100 || scrolled >= total * 0.7 ? "" : "none";
-    }
-    window.addEventListener("scroll", checkScroll, { passive: true });
-    checkScroll();
-  }
 
   const overlay = document.createElement("div");
   overlay.className = "fb-overlay";

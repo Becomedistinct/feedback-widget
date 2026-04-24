@@ -52,13 +52,9 @@ BASE_URL = os.getenv("BASE_URL", "https://feedback-api-production-7e6f.up.railwa
 
 app = FastAPI(title="Feedback Recorder API")
 
-_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
-if not _cors_origins:
-    _cors_origins = ["https://becomedistinct.com", "https://www.becomedistinct.com"]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

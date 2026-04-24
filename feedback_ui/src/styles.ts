@@ -36,23 +36,18 @@ export const WIDGET_CSS = `
     color: rgba(255, 255, 255, 0.9);
   }
 
-  /* Fixed placement fallback (no footer found) */
+  /* Fixed placement fallback (no footer found) — plain text, bottom-left */
   :host([data-placement="fixed"]) .fb-trigger {
     position: fixed;
-    bottom: 16px;
-    right: 16px;
-    color: #fff;
-    background: rgba(0, 0, 0, 0.45);
-    border-radius: 999px;
-    padding: 6px 14px;
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
+    bottom: 14px;
+    left: 16px;
+    color: rgba(0, 0, 0, 0.3);
+    background: none;
+    font-size: 11px;
+    padding: 0;
   }
   :host([data-placement="fixed"]) .fb-trigger:hover {
-    background: rgba(0, 0, 0, 0.65);
-  }
-  :host([data-placement="fixed"]) .fb-trigger:active {
-    transform: scale(0.96);
+    color: rgba(0, 0, 0, 0.55);
   }
   .fb-trigger.fb-trigger-recording {
     position: fixed;
