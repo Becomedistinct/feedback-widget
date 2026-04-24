@@ -36,7 +36,12 @@ DATA_DIR = Path("/data") if Path("/data").exists() else Path(__file__).parent
 SUBMISSIONS_DIR = DATA_DIR / "submissions"
 SUBMISSIONS_DIR.mkdir(exist_ok=True)
 
-SITES_FILE = Path(__file__).parent / "sites.json"
+# sites.json lives on the volume so admin changes survive redeploys
+SITES_FILE = DATA_DIR / "sites.json"
+_bundled_sites = Path(__file__).parent / "sites.json"
+if not SITES_FILE.exists() and _bundled_sites.exists():
+    import shutil
+    shutil.copy(_bundled_sites, SITES_FILE)
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB (Zoho attachment limit)
 
 # Static dir: built widget JS lives here in production (Docker copies it to /app/static/)
@@ -47,9 +52,13 @@ BASE_URL = os.getenv("BASE_URL", "https://feedback-api-production-7e6f.up.railwa
 
 app = FastAPI(title="Feedback Recorder API")
 
+_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if not _cors_origins:
+    _cors_origins = ["https://becomedistinct.com", "https://www.becomedistinct.com"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -320,7 +329,7 @@ function loadSites() {
 </html>""")
 
 
-@app.get("/api/feedback/recordings")
+@app.get("/api/feedback/recordings", dependencies=[Depends(require_admin)])
 async def list_recordings():
     """List all submissions with metadata for redundancy/debugging."""
     recordings = []
@@ -746,7 +755,7 @@ async def test_failure_emails():
     return {"status": "sent", "submission_id": fake_id, "to": NOTIFY_EMAIL}
 
 
-@app.get("/api/admin/failed-submissions")
+@app.get("/api/admin/failed-submissions", dependencies=[Depends(require_admin)])
 async def list_failed_submissions():
     """Return all submissions where Zoho ticket creation failed."""
     failed = []
@@ -764,7 +773,7 @@ async def list_failed_submissions():
     return {"count": len(failed), "submissions": failed}
 
 
-@app.post("/api/admin/retry/{submission_id}")
+@app.post("/api/admin/retry/{submission_id}", dependencies=[Depends(require_admin)])
 async def retry_zoho(submission_id: str):
     """Re-attempt Zoho ticket creation for a failed submission."""
     result = _find_submission(submission_id)
