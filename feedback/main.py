@@ -725,6 +725,27 @@ def mark_zoho_failed(meta_path: Path, meta: dict, error: str) -> None:
     meta_path.write_text(json.dumps(meta, indent=2))
 
 
+@app.post("/api/admin/test-failure-emails", dependencies=[Depends(require_admin)])
+async def test_failure_emails():
+    """Fire both failure email paths with fake data to verify Resend + routing."""
+    fake_id = "test-" + str(uuid.uuid4())[:8]
+    fake_meta = {
+        "id": fake_id,
+        "site_id": "becomedistinct",
+        "client_name": "BecomDistinct (TEST)",
+        "client_email": NOTIFY_EMAIL,
+        "page_url": "https://becomedistinct.com/test",
+        "transcript": "This is a simulated failure test.",
+        "mode": "desktop",
+    }
+    fake_error = "Simulated Zoho API error: 403 Forbidden"
+    await asyncio.gather(
+        send_desk_failure_alert(fake_id, fake_error, fake_meta),
+        send_client_failure_email(fake_id, fake_meta),
+    )
+    return {"status": "sent", "submission_id": fake_id, "to": NOTIFY_EMAIL}
+
+
 @app.get("/api/admin/failed-submissions")
 async def list_failed_submissions():
     """Return all submissions where Zoho ticket creation failed."""
