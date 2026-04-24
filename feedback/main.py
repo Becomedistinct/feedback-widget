@@ -605,7 +605,7 @@ NOTIFY_FROM  = os.getenv("NOTIFY_FROM",  "Feedback Widget <assist@becomedistinct
 
 
 def _resend_send(subject: str, html: str, to: str) -> None:
-    api_key = os.getenv("RESEND_API_KEY")
+    api_key = (os.getenv("RESEND_API_KEY") or "").strip()
     if not api_key:
         logger.error("RESEND_API_KEY not set — cannot send email")
         return
