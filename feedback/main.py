@@ -192,6 +192,11 @@ async def admin_ui():
   #error{color:#dc2626;font-size:13px;margin-top:8px;display:none}
   .empty{color:#9ca3af;font-size:14px;padding:16px 10px}
   .editing td{background:#eff6ff}
+  .btn-copy{background:#f3f4f6;color:#374151;border:1px solid #d1d5db}.btn-copy:hover{background:#e5e7eb}
+  .btn-copy.copied{background:#d1fae5;color:#065f46;border-color:#6ee7b7}
+  .script-row td{background:#f9fafb;padding:8px 10px}
+  .script-box{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px}
+  .script-box code{flex:1;font-size:11px;color:#374151;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:monospace}
 </style>
 </head>
 <body>
@@ -225,6 +230,7 @@ async def admin_ui():
       <thead><tr><th>Site ID</th><th>Client Name</th><th>Client Email</th><th></th></tr></thead>
       <tbody id="sites-tbody"><tr><td class="empty" colspan="4">Loading…</td></tr></tbody>
     </table>
+    <p style="font-size:12px;color:#9ca3af;margin-top:12px">Click "Script" on any row to copy the embed tag for that site.</p>
   </div>
 </div>
 
@@ -254,6 +260,20 @@ document.getElementById('key-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') login();
 });
 
+const API_BASE = window.location.origin;
+
+function embedScript(id) {
+  return `<script src="${API_BASE}/feedback-widget.js" data-site="${id}"><\/script>`;
+}
+
+function copyScript(id, btn) {
+  navigator.clipboard.writeText(embedScript(id)).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Script'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
 function renderSites(sites) {
   const tbody = document.getElementById('sites-tbody');
   const entries = Object.entries(sites);
@@ -267,6 +287,7 @@ function renderSites(sites) {
       <td id="name-${id}">${s.client_name}</td>
       <td id="email-${id}">${s.client_email}</td>
       <td><div class="actions">
+        <button class="btn btn-sm btn-copy" id="copy-${id}" onclick="copyScript('${id}', this)">Script</button>
         <button class="btn btn-sm btn-primary" onclick="startEdit('${id}','${s.client_name}','${s.client_email}')">Edit</button>
         <button class="btn btn-sm btn-danger" onclick="deleteSite('${id}')">Delete</button>
       </div></td>
