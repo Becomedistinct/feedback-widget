@@ -80,6 +80,10 @@ ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 # users.json stores {username: bcrypt_hash} on the Railway volume
 USERS_FILE = DATA_DIR / "users.json"
 
+# invites.json stores {token: {username, email, created_at}} on the volume
+INVITES_FILE = DATA_DIR / "invites.json"
+INVITE_EXPIRY_SECONDS = 7 * 24 * 3600  # 7 days
+
 # In-memory session tokens: {token: username} — cleared on restart
 _sessions: dict = {}
 
@@ -92,6 +96,16 @@ def load_users() -> dict:
 
 def save_users(users: dict) -> None:
     USERS_FILE.write_text(json.dumps(users, indent=2))
+
+
+def load_invites() -> dict:
+    if INVITES_FILE.exists():
+        return json.loads(INVITES_FILE.read_text())
+    return {}
+
+
+def save_invites(invites: dict) -> None:
+    INVITES_FILE.write_text(json.dumps(invites, indent=2))
 
 
 def create_session(username: str) -> str:
@@ -158,21 +172,55 @@ async def admin_list_users():
     return {"users": list(load_users().keys())}
 
 
-@app.post("/api/admin/users", dependencies=[Depends(require_admin)])
-async def admin_create_user(request: Request):
+@app.post("/api/admin/invite", dependencies=[Depends(require_admin)])
+async def admin_invite_user(request: Request):
     body = await request.json()
     username = str(body.get("username", "")).strip()
-    password = str(body.get("password", "")).strip()
-    if not username or not password:
-        raise HTTPException(400, "username and password are required")
-    if len(password) < 8:
-        raise HTTPException(400, "password must be at least 8 characters")
+    email = str(body.get("email", "")).strip()
+    if not username or not email:
+        raise HTTPException(400, "username and email are required")
     users = load_users()
     if username in users:
-        raise HTTPException(409, "username already exists")
-    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    users[username] = hashed
-    save_users(users)
+        raise HTTPException(409, "a user with that username already exists")
+    # Invalidate any existing pending invite for this username
+    invites = load_invites()
+    invites = {t: v for t, v in invites.items() if v.get("username") != username}
+    token = secrets.token_urlsafe(32)
+    invites[token] = {"username": username, "email": email, "created_at": time.time()}
+    save_invites(invites)
+    invite_url = f"{BASE_URL}/admin/accept-invite?token={token}"
+    html = f"""
+    <p>Hi {username},</p>
+    <p>You've been invited to the Feedback Widget admin panel.</p>
+    <p><a href="{invite_url}">Click here to create your account</a></p>
+    <p>This link expires in 7 days.</p>
+    <p style="color:#9ca3af;font-size:12px">If you weren't expecting this, you can ignore it.</p>
+    """
+    await _send_email("You've been invited to Feedback Widget Admin", html, to=email)
+    return {"ok": True}
+
+
+@app.get("/api/admin/invites", dependencies=[Depends(require_admin)])
+async def admin_list_invites():
+    invites = load_invites()
+    now = time.time()
+    active = [
+        {"token": t[:8] + "…", "username": v["username"], "email": v["email"],
+         "expires_in_hours": round((v["created_at"] + INVITE_EXPIRY_SECONDS - now) / 3600, 1)}
+        for t, v in invites.items()
+        if now < v["created_at"] + INVITE_EXPIRY_SECONDS
+    ]
+    return {"invites": active}
+
+
+@app.delete("/api/admin/invites/{username}", dependencies=[Depends(require_admin)])
+async def admin_revoke_invite(username: str):
+    invites = load_invites()
+    before = len(invites)
+    invites = {t: v for t, v in invites.items() if v.get("username") != username}
+    if len(invites) == before:
+        raise HTTPException(404, "no pending invite for that username")
+    save_invites(invites)
     return {"ok": True}
 
 
@@ -183,6 +231,112 @@ async def admin_delete_user(username: str):
         raise HTTPException(404, "user not found")
     del users[username]
     save_users(users)
+    return {"ok": True}
+
+
+@app.get("/admin/accept-invite", response_class=HTMLResponse)
+async def accept_invite_page(token: str = ""):
+    if not token:
+        return HTMLResponse("<p>Invalid link.</p>", status_code=400)
+    invites = load_invites()
+    invite = invites.get(token)
+    if not invite or time.time() > invite["created_at"] + INVITE_EXPIRY_SECONDS:
+        return HTMLResponse("""<!DOCTYPE html><html><head><meta charset="UTF-8">
+        <title>Link Expired</title>
+        <style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb}
+        .box{text-align:center;padding:40px;background:#fff;border-radius:12px;border:1px solid #e5e7eb;max-width:360px}
+        h2{font-size:18px;margin-bottom:8px;color:#111} p{color:#6b7280;font-size:14px}</style>
+        </head><body><div class="box"><h2>Link expired or invalid</h2>
+        <p>Ask your admin to send a new invite.</p></div></body></html>""", status_code=410)
+    username = invite["username"]
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Create your account</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f9fafb;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+  .card{{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:36px;width:100%;max-width:360px}}
+  h1{{font-size:20px;font-weight:700;margin-bottom:6px;color:#111}}
+  .sub{{font-size:14px;color:#6b7280;margin-bottom:24px}}
+  label{{display:block;font-size:12px;font-weight:500;color:#374151;margin-bottom:4px}}
+  input{{width:100%;padding:9px 11px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;font-family:inherit;margin-bottom:14px}}
+  input:focus{{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15)}}
+  .btn{{width:100%;padding:11px;background:#2563eb;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;font-family:inherit}}
+  .btn:hover{{background:#1d4ed8}}
+  .btn:disabled{{background:#93c5fd;cursor:default}}
+  #msg{{font-size:13px;margin-top:12px;text-align:center}}
+  .err{{color:#dc2626}} .ok{{color:#059669}}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Create your account</h1>
+  <p class="sub">Welcome, <strong>{username}</strong>. Set a password to get started.</p>
+  <label>Password</label>
+  <input type="password" id="pw1" placeholder="At least 8 characters" autocomplete="new-password">
+  <label>Confirm password</label>
+  <input type="password" id="pw2" placeholder="Re-enter password" autocomplete="new-password">
+  <button class="btn" id="submit-btn" onclick="submit()">Create account</button>
+  <div id="msg"></div>
+</div>
+<script>
+function submit() {{
+  const pw1 = document.getElementById('pw1').value;
+  const pw2 = document.getElementById('pw2').value;
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('submit-btn');
+  msg.textContent = '';
+  if (pw1.length < 8) {{ msg.className = 'err'; msg.textContent = 'Password must be at least 8 characters.'; return; }}
+  if (pw1 !== pw2) {{ msg.className = 'err'; msg.textContent = 'Passwords do not match.'; return; }}
+  btn.disabled = true;
+  btn.textContent = 'Creating account…';
+  fetch('/api/admin/invite/{token}/accept', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{password: pw1}})
+  }})
+  .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
+  .then(() => {{
+    msg.className = 'ok';
+    msg.textContent = 'Account created! Redirecting to sign in…';
+    setTimeout(() => window.location.href = '/admin', 1500);
+  }})
+  .catch(err => {{
+    btn.disabled = false;
+    btn.textContent = 'Create account';
+    msg.className = 'err';
+    msg.textContent = err || 'Something went wrong.';
+  }});
+}}
+['pw1','pw2'].forEach(id => document.getElementById(id).addEventListener('keydown', e => {{ if (e.key === 'Enter') submit(); }}));
+</script>
+</body>
+</html>""")
+
+
+@app.post("/api/admin/invite/{token}/accept")
+async def accept_invite(token: str, request: Request):
+    invites = load_invites()
+    invite = invites.get(token)
+    if not invite or time.time() > invite["created_at"] + INVITE_EXPIRY_SECONDS:
+        raise HTTPException(410, "Invite link has expired or is invalid")
+    body = await request.json()
+    password = str(body.get("password", "")).strip()
+    if len(password) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    username = invite["username"]
+    users = load_users()
+    if username in users:
+        raise HTTPException(409, "account already exists — contact your admin")
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    users[username] = hashed
+    save_users(users)
+    # Remove the used invite
+    del invites[token]
+    save_invites(invites)
     return {"ok": True}
 
 
@@ -323,14 +477,25 @@ async def admin_ui():
       <thead><tr><th>Username</th><th></th></tr></thead>
       <tbody id="users-tbody"><tr><td class="empty" colspan="2">Loading…</td></tr></tbody>
     </table>
-    <div style="margin-top:16px;border-top:1px solid #f3f4f6;padding-top:16px">
-      <h2 style="margin-bottom:12px">Add Team Member</h2>
+
+    <div style="margin-top:20px;border-top:1px solid #f3f4f6;padding-top:20px">
+      <h2 style="margin-bottom:4px">Pending Invites</h2>
+      <p style="font-size:12px;color:#9ca3af;margin-bottom:12px">Invites expire after 7 days.</p>
+      <table>
+        <thead><tr><th>Username</th><th>Email</th><th>Expires</th><th></th></tr></thead>
+        <tbody id="invites-tbody"><tr><td class="empty" colspan="4">No pending invites.</td></tr></tbody>
+      </table>
+    </div>
+
+    <div style="margin-top:20px;border-top:1px solid #f3f4f6;padding-top:20px">
+      <h2 style="margin-bottom:12px">Invite Team Member</h2>
       <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end">
         <div><label>Username</label><input id="new-uname" placeholder="alice"></div>
-        <div><label>Password (min 8 chars)</label><input id="new-upass" type="password" placeholder="••••••••"></div>
-        <div style="padding-bottom:1px"><button class="btn btn-primary" onclick="addUser()">Add</button></div>
+        <div><label>Email</label><input id="new-uemail" type="email" placeholder="alice@example.com"></div>
+        <div style="padding-bottom:1px"><button class="btn btn-primary" onclick="inviteUser()">Send Invite</button></div>
       </div>
       <div id="user-error" style="color:#dc2626;font-size:13px;margin-top:8px;display:none"></div>
+      <div id="user-ok" style="color:#059669;font-size:13px;margin-top:8px;display:none"></div>
     </div>
   </div>
 </div>
@@ -360,6 +525,7 @@ function login() {
         document.getElementById('logged-in-user').textContent = 'Signed in as ' + data.username;
       }
       loadUsers();
+      loadInvites();
       return fetch('/api/admin/sites', { headers: { 'X-Admin-Key': adminKey } });
     })
     .then(r => r.json())
@@ -479,30 +645,59 @@ function renderUsers(users) {
     </tr>`).join('');
 }
 
-function addUser() {
-  const username = document.getElementById('new-uname').value.trim();
-  const password = document.getElementById('new-upass').value.trim();
-  const errEl = document.getElementById('user-error');
-  errEl.style.display = 'none';
-  if (!username || !password) { errEl.textContent = 'Both fields are required.'; errEl.style.display = 'block'; return; }
-  fetch('/api/admin/users', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
-    body: JSON.stringify({ username, password })
-  })
-    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
-    .then(() => {
-      document.getElementById('new-uname').value = '';
-      document.getElementById('new-upass').value = '';
-      loadUsers();
-    })
-    .catch(msg => { errEl.textContent = msg || 'Error adding user.'; errEl.style.display = 'block'; });
-}
-
 function deleteUser(username) {
   if (!confirm('Remove "' + username + '"? They will no longer be able to sign in.')) return;
   fetch('/api/admin/users/' + username, { method: 'DELETE', headers: { 'X-Admin-Key': adminKey } })
     .then(() => loadUsers());
+}
+
+function loadInvites() {
+  fetch('/api/admin/invites', { headers: { 'X-Admin-Key': adminKey } })
+    .then(r => r.json()).then(data => renderInvites(data.invites || []));
+}
+
+function renderInvites(invites) {
+  const tbody = document.getElementById('invites-tbody');
+  if (!invites.length) {
+    tbody.innerHTML = '<tr><td class="empty" colspan="4">No pending invites.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = invites.map(i => `
+    <tr>
+      <td>${i.username}</td>
+      <td>${i.email}</td>
+      <td style="color:#6b7280;font-size:12px">${i.expires_in_hours}h</td>
+      <td style="text-align:right"><button class="btn btn-sm btn-danger" onclick="revokeInvite('${i.username}')">Revoke</button></td>
+    </tr>`).join('');
+}
+
+function revokeInvite(username) {
+  if (!confirm('Revoke invite for "' + username + '"?')) return;
+  fetch('/api/admin/invites/' + username, { method: 'DELETE', headers: { 'X-Admin-Key': adminKey } })
+    .then(() => loadInvites());
+}
+
+function inviteUser() {
+  const username = document.getElementById('new-uname').value.trim();
+  const email = document.getElementById('new-uemail').value.trim();
+  const errEl = document.getElementById('user-error');
+  const okEl = document.getElementById('user-ok');
+  errEl.style.display = 'none'; okEl.style.display = 'none';
+  if (!username || !email) { errEl.textContent = 'Both fields are required.'; errEl.style.display = 'block'; return; }
+  fetch('/api/admin/invite', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
+    body: JSON.stringify({ username, email })
+  })
+    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
+    .then(() => {
+      document.getElementById('new-uname').value = '';
+      document.getElementById('new-uemail').value = '';
+      okEl.textContent = 'Invite sent to ' + email;
+      okEl.style.display = 'block';
+      loadInvites();
+    })
+    .catch(msg => { errEl.textContent = msg || 'Error sending invite.'; errEl.style.display = 'block'; });
 }
 </script>
 </body>
