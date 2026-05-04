@@ -98,6 +98,21 @@ def save_users(users: dict) -> None:
     USERS_FILE.write_text(json.dumps(users, indent=2))
 
 
+def _user_hash(entry) -> str | None:
+    """Return bcrypt hash from a user entry (str = legacy, dict = current)."""
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return entry.get("hash")
+    return None
+
+
+def _user_email(entry) -> str | None:
+    if isinstance(entry, dict):
+        return entry.get("email")
+    return None
+
+
 def load_invites() -> dict:
     if INVITES_FILE.exists():
         return json.loads(INVITES_FILE.read_text())
@@ -106,6 +121,21 @@ def load_invites() -> dict:
 
 def save_invites(invites: dict) -> None:
     INVITES_FILE.write_text(json.dumps(invites, indent=2))
+
+
+# resets.json stores {token: {username, created_at}}
+RESETS_FILE = DATA_DIR / "resets.json"
+RESET_EXPIRY_SECONDS = 2 * 3600  # 2 hours
+
+
+def load_resets() -> dict:
+    if RESETS_FILE.exists():
+        return json.loads(RESETS_FILE.read_text())
+    return {}
+
+
+def save_resets(resets: dict) -> None:
+    RESETS_FILE.write_text(json.dumps(resets, indent=2))
 
 
 def create_session(username: str) -> str:
@@ -160,7 +190,7 @@ async def admin_login(request: Request):
     # Volume users: bcrypt check
     if username:
         users = load_users()
-        hashed = users.get(username)
+        hashed = _user_hash(users.get(username))
         if hashed and bcrypt.checkpw(password.encode(), hashed.encode()):
             token = create_session(username)
             return {"ok": True, "token": token, "username": username}
@@ -231,6 +261,137 @@ async def admin_delete_user(username: str):
         raise HTTPException(404, "user not found")
     del users[username]
     save_users(users)
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{username}/reset", dependencies=[Depends(require_admin)])
+async def admin_trigger_reset(username: str):
+    users = load_users()
+    entry = users.get(username)
+    if entry is None:
+        raise HTTPException(404, "user not found")
+    email = _user_email(entry)
+    if not email:
+        raise HTTPException(400, "no email on file for this user — remove and re-invite them")
+    # Invalidate any existing reset for this user
+    resets = load_resets()
+    resets = {t: v for t, v in resets.items() if v.get("username") != username}
+    token = secrets.token_urlsafe(32)
+    resets[token] = {"username": username, "created_at": time.time()}
+    save_resets(resets)
+    reset_url = f"{BASE_URL}/admin/reset-password?token={token}"
+    html = f"""
+    <p>Hi {username},</p>
+    <p>A password reset was requested for your Feedback Widget admin account.</p>
+    <p><a href="{reset_url}">Click here to set a new password</a></p>
+    <p>This link expires in 2 hours. If you didn't request this, you can ignore it.</p>
+    """
+    await _send_email("Reset your Feedback Widget password", html, to=email)
+    return {"ok": True}
+
+
+@app.get("/admin/reset-password", response_class=HTMLResponse)
+async def reset_password_page(token: str = ""):
+    if not token:
+        return HTMLResponse("<p>Invalid link.</p>", status_code=400)
+    resets = load_resets()
+    reset = resets.get(token)
+    if not reset or time.time() > reset["created_at"] + RESET_EXPIRY_SECONDS:
+        return HTMLResponse("""<!DOCTYPE html><html><head><meta charset="UTF-8">
+        <title>Link Expired</title>
+        <style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb}
+        .box{text-align:center;padding:40px;background:#fff;border-radius:12px;border:1px solid #e5e7eb;max-width:360px}
+        h2{font-size:18px;margin-bottom:8px;color:#111} p{color:#6b7280;font-size:14px}</style>
+        </head><body><div class="box"><h2>Link expired or invalid</h2>
+        <p>Ask your admin to send a new password reset link.</p></div></body></html>""", status_code=410)
+    username = reset["username"]
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reset password</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f9fafb;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+  .card{{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:36px;width:100%;max-width:360px}}
+  h1{{font-size:20px;font-weight:700;margin-bottom:6px;color:#111}}
+  .sub{{font-size:14px;color:#6b7280;margin-bottom:24px}}
+  label{{display:block;font-size:12px;font-weight:500;color:#374151;margin-bottom:4px}}
+  input{{width:100%;padding:9px 11px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;font-family:inherit;margin-bottom:14px}}
+  input:focus{{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15)}}
+  .btn{{width:100%;padding:11px;background:#2563eb;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;font-family:inherit}}
+  .btn:hover{{background:#1d4ed8}} .btn:disabled{{background:#93c5fd;cursor:default}}
+  #msg{{font-size:13px;margin-top:12px;text-align:center}}
+  .err{{color:#dc2626}} .ok{{color:#059669}}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Reset your password</h1>
+  <p class="sub">Resetting password for <strong>{username}</strong>.</p>
+  <label>New password</label>
+  <input type="password" id="pw1" placeholder="At least 8 characters" autocomplete="new-password">
+  <label>Confirm new password</label>
+  <input type="password" id="pw2" placeholder="Re-enter password" autocomplete="new-password">
+  <button class="btn" id="submit-btn" onclick="submit()">Set new password</button>
+  <div id="msg"></div>
+</div>
+<script>
+function submit() {{
+  const pw1 = document.getElementById('pw1').value;
+  const pw2 = document.getElementById('pw2').value;
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('submit-btn');
+  msg.textContent = '';
+  if (pw1.length < 8) {{ msg.className = 'err'; msg.textContent = 'Password must be at least 8 characters.'; return; }}
+  if (pw1 !== pw2) {{ msg.className = 'err'; msg.textContent = 'Passwords do not match.'; return; }}
+  btn.disabled = true; btn.textContent = 'Saving…';
+  fetch('/api/admin/reset/{token}/confirm', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{password: pw1}})
+  }})
+  .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
+  .then(() => {{
+    msg.className = 'ok';
+    msg.textContent = 'Password updated! Redirecting to sign in…';
+    setTimeout(() => window.location.href = '/admin', 1500);
+  }})
+  .catch(err => {{
+    btn.disabled = false; btn.textContent = 'Set new password';
+    msg.className = 'err'; msg.textContent = err || 'Something went wrong.';
+  }});
+}}
+['pw1','pw2'].forEach(id => document.getElementById(id).addEventListener('keydown', e => {{ if (e.key === 'Enter') submit(); }}));
+</script>
+</body>
+</html>""")
+
+
+@app.post("/api/admin/reset/{token}/confirm")
+async def confirm_reset(token: str, request: Request):
+    resets = load_resets()
+    reset = resets.get(token)
+    if not reset or time.time() > reset["created_at"] + RESET_EXPIRY_SECONDS:
+        raise HTTPException(410, "Reset link has expired or is invalid")
+    body = await request.json()
+    password = str(body.get("password", "")).strip()
+    if len(password) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    username = reset["username"]
+    users = load_users()
+    if username not in users:
+        raise HTTPException(404, "user not found")
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    entry = users[username]
+    if isinstance(entry, dict):
+        entry["hash"] = hashed
+    else:
+        users[username] = hashed  # preserve legacy format
+    save_users(users)
+    del resets[token]
+    save_resets(resets)
     return {"ok": True}
 
 
@@ -332,7 +493,7 @@ async def accept_invite(token: str, request: Request):
     if username in users:
         raise HTTPException(409, "account already exists — contact your admin")
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    users[username] = hashed
+    users[username] = {"hash": hashed, "email": invite["email"]}
     save_users(users)
     # Remove the used invite
     del invites[token]
@@ -415,6 +576,7 @@ async def admin_ui():
   input:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15)}
   .btn{padding:7px 14px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit}
   .btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
+  .btn-secondary{background:#f3f4f6;color:#374151;border:1px solid #d1d5db}.btn-secondary:hover{background:#e5e7eb}
   .btn-danger{background:#fee2e2;color:#dc2626}.btn-danger:hover{background:#fecaca}
   .btn-sm{padding:5px 10px;font-size:12px}
   .form-row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
@@ -436,11 +598,13 @@ async def admin_ui():
 <body>
 
 <div id="auth-screen" class="auth-wrap">
-  <h1>Admin</h1>
-  <p>Sign in to manage sites.</p>
-  <input type="text" id="username-input" placeholder="Username" autocomplete="username" style="margin-bottom:8px">
-  <input type="password" id="key-input" placeholder="Password" autocomplete="current-password">
-  <button class="btn btn-primary" style="width:100%;margin-top:12px" onclick="login()">Sign in</button>
+  <h1>Admin Sign In</h1>
+  <p>Team members: enter your username and password.<br>Admin key holders: leave username blank.</p>
+  <label for="username-input" style="text-align:left;display:block;font-size:12px;font-weight:500;color:#374151;margin-bottom:4px">Username</label>
+  <input type="text" id="username-input" placeholder="Leave blank if using admin key" autocomplete="username" style="margin-bottom:12px">
+  <label for="key-input" style="text-align:left;display:block;font-size:12px;font-weight:500;color:#374151;margin-bottom:4px">Password / Admin key</label>
+  <input type="password" id="key-input" placeholder="Your password or admin key" autocomplete="current-password">
+  <button class="btn btn-primary" style="width:100%;margin-top:16px" onclick="login()">Sign in</button>
   <div id="error">Invalid username or password</div>
 </div>
 
@@ -641,8 +805,20 @@ function renderUsers(users) {
   tbody.innerHTML = users.map(u => `
     <tr>
       <td>${u}</td>
-      <td style="text-align:right"><button class="btn btn-sm btn-danger" onclick="deleteUser('${u}')">Remove</button></td>
+      <td style="text-align:right"><div class="actions" style="justify-content:flex-end">
+        <button class="btn btn-sm btn-secondary" onclick="resetUser('${u}', this)">Reset Password</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteUser('${u}')">Remove</button>
+      </div></td>
     </tr>`).join('');
+}
+
+function resetUser(username, btn) {
+  if (!confirm('Send a password reset email to "' + username + '"?')) return;
+  btn.disabled = true; btn.textContent = 'Sending…';
+  fetch('/api/admin/users/' + username + '/reset', { method: 'POST', headers: { 'X-Admin-Key': adminKey } })
+    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
+    .then(() => { btn.textContent = 'Sent!'; setTimeout(() => { btn.disabled = false; btn.textContent = 'Reset Password'; }, 3000); })
+    .catch(msg => { btn.disabled = false; btn.textContent = 'Reset Password'; alert(msg || 'Failed to send reset email.'); });
 }
 
 function deleteUser(username) {
