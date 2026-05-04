@@ -14,7 +14,9 @@ import subprocess
 import uuid
 import time
 import os
+import secrets
 import logging
+import bcrypt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,19 +77,33 @@ async def serve_widget():
 
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
-_admin_users_raw = os.getenv("ADMIN_USERS", "")
-ADMIN_USERS: dict = {}
-if _admin_users_raw:
-    try:
-        ADMIN_USERS = json.loads(_admin_users_raw)
-    except Exception:
-        logger.warning("ADMIN_USERS env var is not valid JSON — ignoring")
+# users.json stores {username: bcrypt_hash} on the Railway volume
+USERS_FILE = DATA_DIR / "users.json"
+
+# In-memory session tokens: {token: username} — cleared on restart
+_sessions: dict = {}
+
+
+def load_users() -> dict:
+    if USERS_FILE.exists():
+        return json.loads(USERS_FILE.read_text())
+    return {}
+
+
+def save_users(users: dict) -> None:
+    USERS_FILE.write_text(json.dumps(users, indent=2))
+
+
+def create_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    _sessions[token] = username
+    return token
 
 
 def _is_valid_key(key: str) -> bool:
     if ADMIN_KEY and key == ADMIN_KEY:
         return True
-    return bool(ADMIN_USERS) and key in ADMIN_USERS.values()
+    return key in _sessions
 
 
 def require_admin(request: Request):
@@ -123,13 +139,51 @@ async def admin_login(request: Request):
     password = str(body.get("password", "")).strip()
     if not password:
         raise HTTPException(403, "Invalid credentials")
-    # Master key: accept any username
+    # Master ADMIN_KEY: no username required
     if ADMIN_KEY and password == ADMIN_KEY:
-        return {"ok": True, "token": ADMIN_KEY, "username": username or "admin"}
-    # Named users
-    if username and username in ADMIN_USERS and ADMIN_USERS[username] == password:
-        return {"ok": True, "token": ADMIN_USERS[username], "username": username}
+        token = create_session(username or "admin")
+        return {"ok": True, "token": token, "username": username or "admin"}
+    # Volume users: bcrypt check
+    if username:
+        users = load_users()
+        hashed = users.get(username)
+        if hashed and bcrypt.checkpw(password.encode(), hashed.encode()):
+            token = create_session(username)
+            return {"ok": True, "token": token, "username": username}
     raise HTTPException(403, "Invalid credentials")
+
+
+@app.get("/api/admin/users", dependencies=[Depends(require_admin)])
+async def admin_list_users():
+    return {"users": list(load_users().keys())}
+
+
+@app.post("/api/admin/users", dependencies=[Depends(require_admin)])
+async def admin_create_user(request: Request):
+    body = await request.json()
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", "")).strip()
+    if not username or not password:
+        raise HTTPException(400, "username and password are required")
+    if len(password) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    users = load_users()
+    if username in users:
+        raise HTTPException(409, "username already exists")
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    users[username] = hashed
+    save_users(users)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{username}", dependencies=[Depends(require_admin)])
+async def admin_delete_user(username: str):
+    users = load_users()
+    if username not in users:
+        raise HTTPException(404, "user not found")
+    del users[username]
+    save_users(users)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +316,23 @@ async def admin_ui():
     </table>
     <p style="font-size:12px;color:#9ca3af;margin-top:12px">Click "Script" on any row to copy the embed tag for that site.</p>
   </div>
+
+  <div class="card">
+    <h2>Team Members</h2>
+    <table>
+      <thead><tr><th>Username</th><th></th></tr></thead>
+      <tbody id="users-tbody"><tr><td class="empty" colspan="2">Loading…</td></tr></tbody>
+    </table>
+    <div style="margin-top:16px;border-top:1px solid #f3f4f6;padding-top:16px">
+      <h2 style="margin-bottom:12px">Add Team Member</h2>
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end">
+        <div><label>Username</label><input id="new-uname" placeholder="alice"></div>
+        <div><label>Password (min 8 chars)</label><input id="new-upass" type="password" placeholder="••••••••"></div>
+        <div style="padding-bottom:1px"><button class="btn btn-primary" onclick="addUser()">Add</button></div>
+      </div>
+      <div id="user-error" style="color:#dc2626;font-size:13px;margin-top:8px;display:none"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -288,6 +359,7 @@ function login() {
       if (data.username) {
         document.getElementById('logged-in-user').textContent = 'Signed in as ' + data.username;
       }
+      loadUsers();
       return fetch('/api/admin/sites', { headers: { 'X-Admin-Key': adminKey } });
     })
     .then(r => r.json())
@@ -387,6 +459,50 @@ function addSite() {
 function loadSites() {
   fetch('/api/admin/sites', { headers: { 'X-Admin-Key': adminKey } })
     .then(r => r.json()).then(renderSites);
+}
+
+function loadUsers() {
+  fetch('/api/admin/users', { headers: { 'X-Admin-Key': adminKey } })
+    .then(r => r.json()).then(data => renderUsers(data.users || []));
+}
+
+function renderUsers(users) {
+  const tbody = document.getElementById('users-tbody');
+  if (!users.length) {
+    tbody.innerHTML = '<tr><td class="empty" colspan="2">No team members yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = users.map(u => `
+    <tr>
+      <td>${u}</td>
+      <td style="text-align:right"><button class="btn btn-sm btn-danger" onclick="deleteUser('${u}')">Remove</button></td>
+    </tr>`).join('');
+}
+
+function addUser() {
+  const username = document.getElementById('new-uname').value.trim();
+  const password = document.getElementById('new-upass').value.trim();
+  const errEl = document.getElementById('user-error');
+  errEl.style.display = 'none';
+  if (!username || !password) { errEl.textContent = 'Both fields are required.'; errEl.style.display = 'block'; return; }
+  fetch('/api/admin/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
+    body: JSON.stringify({ username, password })
+  })
+    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
+    .then(() => {
+      document.getElementById('new-uname').value = '';
+      document.getElementById('new-upass').value = '';
+      loadUsers();
+    })
+    .catch(msg => { errEl.textContent = msg || 'Error adding user.'; errEl.style.display = 'block'; });
+}
+
+function deleteUser(username) {
+  if (!confirm('Remove "' + username + '"? They will no longer be able to sign in.')) return;
+  fetch('/api/admin/users/' + username, { method: 'DELETE', headers: { 'X-Admin-Key': adminKey } })
+    .then(() => loadUsers());
 }
 </script>
 </body>
