@@ -39,7 +39,8 @@ railway restart --service 899b46bd-a8c2-4746-85d0-c7796ffed920 --yes
 - `RESEND_API_KEY` — Resend API key (no trailing spaces)
 - `NOTIFY_EMAIL` — desk alert recipient (default: vince@becomedistinct.com)
 - `NOTIFY_FROM` — sender address (default: Feedback Widget <assist@becomedistinct.com>)
-- `ADMIN_KEY` — protects /admin UI and admin API endpoints
+- `ADMIN_KEY` — master admin key (single-user fallback; any username accepted at login)
+- `ADMIN_USERS` — JSON object of named users: `{"alice": "password1", "bob": "password2"}`
 - `CORS_ORIGINS` — optional comma-separated list to override default allowed origins
 
 ## Live URLs

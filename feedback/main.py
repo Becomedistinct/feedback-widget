@@ -75,10 +75,24 @@ async def serve_widget():
 
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
+_admin_users_raw = os.getenv("ADMIN_USERS", "")
+ADMIN_USERS: dict = {}
+if _admin_users_raw:
+    try:
+        ADMIN_USERS = json.loads(_admin_users_raw)
+    except Exception:
+        logger.warning("ADMIN_USERS env var is not valid JSON — ignoring")
+
+
+def _is_valid_key(key: str) -> bool:
+    if ADMIN_KEY and key == ADMIN_KEY:
+        return True
+    return bool(ADMIN_USERS) and key in ADMIN_USERS.values()
+
 
 def require_admin(request: Request):
     key = request.headers.get("X-Admin-Key") or request.query_params.get("key", "")
-    if not ADMIN_KEY or key != ADMIN_KEY:
+    if not key or not _is_valid_key(key):
         raise HTTPException(403, "Invalid or missing admin key")
 
 
@@ -100,6 +114,22 @@ async def health():
 @app.get("/api/feedback/sites")
 async def list_sites_public():
     return load_sites()
+
+
+@app.post("/api/admin/login")
+async def admin_login(request: Request):
+    body = await request.json()
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", "")).strip()
+    if not password:
+        raise HTTPException(403, "Invalid credentials")
+    # Master key: accept any username
+    if ADMIN_KEY and password == ADMIN_KEY:
+        return {"ok": True, "token": ADMIN_KEY, "username": username or "admin"}
+    # Named users
+    if username and username in ADMIN_USERS and ADMIN_USERS[username] == password:
+        return {"ok": True, "token": ADMIN_USERS[username], "username": username}
+    raise HTTPException(403, "Invalid credentials")
 
 
 # ---------------------------------------------------------------------------
@@ -199,14 +229,18 @@ async def admin_ui():
 
 <div id="auth-screen" class="auth-wrap">
   <h1>Admin</h1>
-  <p>Enter your admin key to continue.</p>
-  <input type="password" id="key-input" placeholder="Admin key" autocomplete="current-password">
-  <button class="btn btn-primary" style="width:100%" onclick="login()">Sign in</button>
-  <div id="error">Incorrect key</div>
+  <p>Sign in to manage sites.</p>
+  <input type="text" id="username-input" placeholder="Username" autocomplete="username" style="margin-bottom:8px">
+  <input type="password" id="key-input" placeholder="Password" autocomplete="current-password">
+  <button class="btn btn-primary" style="width:100%;margin-top:12px" onclick="login()">Sign in</button>
+  <div id="error">Invalid username or password</div>
 </div>
 
 <div id="app" class="wrap" style="display:none">
-  <h1>Feedback Widget</h1>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+    <h1>Feedback Widget</h1>
+    <span id="logged-in-user" style="font-size:13px;color:#6b7280"></span>
+  </div>
   <p class="sub">Manage registered sites and their contact emails.</p>
 
   <div class="card">
@@ -234,26 +268,39 @@ async def admin_ui():
 let adminKey = '';
 
 function login() {
-  const key = document.getElementById('key-input').value.trim();
-  if (!key) return;
-  adminKey = key;
-  fetch('/api/admin/sites', { headers: { 'X-Admin-Key': key } })
+  const username = document.getElementById('username-input').value.trim();
+  const password = document.getElementById('key-input').value.trim();
+  if (!password) return;
+  document.getElementById('error').style.display = 'none';
+  fetch('/api/admin/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  })
     .then(r => {
-      if (r.status === 403) throw new Error('bad key');
+      if (r.status === 403) throw new Error('bad credentials');
       return r.json();
     })
     .then(data => {
+      adminKey = data.token;
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = '';
-      renderSites(data);
+      if (data.username) {
+        document.getElementById('logged-in-user').textContent = 'Signed in as ' + data.username;
+      }
+      return fetch('/api/admin/sites', { headers: { 'X-Admin-Key': adminKey } });
     })
+    .then(r => r.json())
+    .then(sites => renderSites(sites))
     .catch(() => {
       document.getElementById('error').style.display = 'block';
     });
 }
 
-document.getElementById('key-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') login();
+['username-input', 'key-input'].forEach(id => {
+  document.getElementById(id).addEventListener('keydown', e => {
+    if (e.key === 'Enter') login();
+  });
 });
 
 const API_BASE = window.location.origin;
