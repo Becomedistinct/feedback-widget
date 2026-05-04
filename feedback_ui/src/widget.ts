@@ -168,8 +168,8 @@ export function createWidget(config: WidgetConfig) {
       "Thanks for using this feedback tool. If you clicked on this " +
       "accidentally, feel free to close this panel or refresh the page. " +
       "By submitting a recording here, it will be sent to the website " +
-      "support team at becomedistinct.com, and changes will be made to " +
-      "the website based on the feedback you provide.";
+      "support team, and changes will be made to the website based on " +
+      "the feedback you provide.";
     overlay.appendChild(notice);
 
     if (desktopMode) {
