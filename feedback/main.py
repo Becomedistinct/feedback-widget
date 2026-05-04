@@ -182,19 +182,20 @@ async def admin_login(request: Request):
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", "")).strip()
     if not password:
-        raise HTTPException(403, "Invalid credentials")
+        raise HTTPException(403, "Please enter your password")
     # Master ADMIN_KEY: no username required
     if ADMIN_KEY and password == ADMIN_KEY:
         token = create_session(username or "admin")
         return {"ok": True, "token": token, "username": username or "admin"}
-    # Volume users: bcrypt check
-    if username:
-        users = load_users()
-        hashed = _user_hash(users.get(username))
-        if hashed and bcrypt.checkpw(password.encode(), hashed.encode()):
-            token = create_session(username)
-            return {"ok": True, "token": token, "username": username}
-    raise HTTPException(403, "Invalid credentials")
+    # Volume users: require username for bcrypt check
+    if not username:
+        raise HTTPException(403, "Please enter your username")
+    users = load_users()
+    hashed = _user_hash(users.get(username))
+    if hashed and bcrypt.checkpw(password.encode(), hashed.encode()):
+        token = create_session(username)
+        return {"ok": True, "token": token, "username": username}
+    raise HTTPException(403, "Incorrect username or password")
 
 
 @app.get("/api/admin/users", dependencies=[Depends(require_admin)])
@@ -287,6 +288,100 @@ async def admin_trigger_reset(username: str):
     <p>This link expires in 2 hours. If you didn't request this, you can ignore it.</p>
     """
     await _send_email("Reset your Feedback Widget password", html, to=email)
+    return {"ok": True}
+
+
+@app.get("/admin/forgot-password", response_class=HTMLResponse)
+async def forgot_password_page():
+    return HTMLResponse("""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Forgot password</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f9fafb;display:flex;align-items:center;justify-content:center;min-height:100vh}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:36px;width:100%;max-width:360px}
+  h1{font-size:20px;font-weight:700;margin-bottom:6px;color:#111}
+  .sub{font-size:14px;color:#6b7280;margin-bottom:24px;line-height:1.5}
+  label{display:block;font-size:12px;font-weight:500;color:#374151;margin-bottom:4px}
+  input{width:100%;padding:9px 11px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;font-family:inherit;margin-bottom:14px}
+  input:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+  .btn{width:100%;padding:11px;background:#2563eb;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;font-family:inherit}
+  .btn:hover{background:#1d4ed8} .btn:disabled{background:#93c5fd;cursor:default}
+  .back{display:block;text-align:center;margin-top:16px;font-size:13px;color:#6b7280;text-decoration:none}
+  .back:hover{color:#111}
+  #msg{font-size:13px;margin-top:12px;text-align:center}
+  .err{color:#dc2626} .ok{color:#059669}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Forgot your password?</h1>
+  <p class="sub">Enter your username and we'll email you a link to reset your password.</p>
+  <label>Username</label>
+  <input type="text" id="username" placeholder="Your username" autocomplete="username">
+  <button class="btn" id="submit-btn" onclick="submit()">Send reset link</button>
+  <div id="msg"></div>
+  <a href="/admin" class="back">Back to sign in</a>
+</div>
+<script>
+function submit() {
+  const username = document.getElementById('username').value.trim();
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('submit-btn');
+  msg.textContent = '';
+  if (!username) { msg.className = 'err'; msg.textContent = 'Please enter your username.'; return; }
+  btn.disabled = true; btn.textContent = 'Sending…';
+  fetch('/api/admin/forgot-password', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username})
+  })
+  .then(r => r.json())
+  .then(() => {
+    msg.className = 'ok';
+    msg.textContent = 'If we have an email on file for that username, a reset link has been sent.';
+    btn.disabled = false; btn.textContent = 'Send reset link';
+    document.getElementById('username').value = '';
+  })
+  .catch(() => {
+    msg.className = 'err'; msg.textContent = 'Something went wrong. Please try again.';
+    btn.disabled = false; btn.textContent = 'Send reset link';
+  });
+}
+document.getElementById('username').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+</script>
+</body>
+</html>""")
+
+
+@app.post("/api/admin/forgot-password")
+async def forgot_password(request: Request):
+    body = await request.json()
+    username = str(body.get("username", "")).strip()
+    if username:
+        users = load_users()
+        entry = users.get(username)
+        if entry:
+            email = _user_email(entry)
+            if email:
+                resets = load_resets()
+                resets = {t: v for t, v in resets.items() if v.get("username") != username}
+                token = secrets.token_urlsafe(32)
+                resets[token] = {"username": username, "created_at": time.time()}
+                save_resets(resets)
+                reset_url = f"{BASE_URL}/admin/reset-password?token={token}"
+                html = f"""
+                <p>Hi {username},</p>
+                <p>A password reset was requested for your Feedback Widget admin account.</p>
+                <p><a href="{reset_url}">Click here to set a new password</a></p>
+                <p>This link expires in 2 hours.</p>
+                <p style="color:#9ca3af;font-size:12px">If you didn't request this, you can ignore it.</p>
+                """
+                await _send_email("Reset your Feedback Widget password", html, to=email)
+    # Always return the same response to avoid username enumeration
     return {"ok": True}
 
 
@@ -606,6 +701,7 @@ async def admin_ui():
   <input type="password" id="key-input" placeholder="Your password or admin key" autocomplete="current-password">
   <button class="btn btn-primary" style="width:100%;margin-top:16px" onclick="login()">Sign in</button>
   <div id="error">Invalid username or password</div>
+  <a href="/admin/forgot-password" style="display:block;margin-top:14px;font-size:13px;color:#6b7280;text-decoration:none">Forgot your password?</a>
 </div>
 
 <div id="app" class="wrap" style="display:none">
@@ -678,7 +774,7 @@ function login() {
     body: JSON.stringify({ username, password })
   })
     .then(r => {
-      if (r.status === 403) throw new Error('bad credentials');
+      if (!r.ok) return r.json().then(e => Promise.reject(e.detail || 'Sign in failed'));
       return r.json();
     })
     .then(data => {
@@ -694,8 +790,10 @@ function login() {
     })
     .then(r => r.json())
     .then(sites => renderSites(sites))
-    .catch(() => {
-      document.getElementById('error').style.display = 'block';
+    .catch(msg => {
+      const el = document.getElementById('error');
+      el.textContent = typeof msg === 'string' ? msg : 'Sign in failed';
+      el.style.display = 'block';
     });
 }
 
