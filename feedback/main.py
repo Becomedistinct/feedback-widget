@@ -200,7 +200,30 @@ async def admin_login(request: Request):
 
 @app.get("/api/admin/users", dependencies=[Depends(require_admin)])
 async def admin_list_users():
-    return {"users": list(load_users().keys())}
+    users = load_users()
+    return {"users": [
+        {"username": u, "email": _user_email(entry)}
+        for u, entry in users.items()
+    ]}
+
+
+@app.put("/api/admin/users/{username}/email", dependencies=[Depends(require_admin)])
+async def admin_set_user_email(username: str, request: Request):
+    body = await request.json()
+    email = str(body.get("email", "")).strip()
+    if not email or "@" not in email:
+        raise HTTPException(400, "valid email required")
+    users = load_users()
+    entry = users.get(username)
+    if entry is None:
+        raise HTTPException(404, "user not found")
+    if isinstance(entry, str):
+        # Legacy format: upgrade to dict
+        users[username] = {"hash": entry, "email": email}
+    else:
+        entry["email"] = email
+    save_users(users)
+    return {"ok": True}
 
 
 @app.post("/api/admin/invite", dependencies=[Depends(require_admin)])
@@ -365,6 +388,7 @@ async def forgot_password(request: Request):
         users = load_users()
         entry = users.get(username)
         if entry:
+            # Existing account: send reset link if we have an email on file
             email = _user_email(entry)
             if email:
                 resets = load_resets()
@@ -381,6 +405,31 @@ async def forgot_password(request: Request):
                 <p style="color:#9ca3af;font-size:12px">If you didn't request this, you can ignore it.</p>
                 """
                 await _send_email("Reset your Feedback Widget password", html, to=email)
+        else:
+            # No account yet: if there's a pending invite, refresh and resend it
+            invites = load_invites()
+            existing = next(
+                ((t, v) for t, v in invites.items() if v.get("username") == username),
+                None,
+            )
+            if existing:
+                old_token, invite = existing
+                del invites[old_token]
+                new_token = secrets.token_urlsafe(32)
+                invites[new_token] = {
+                    "username": username,
+                    "email": invite["email"],
+                    "created_at": time.time(),
+                }
+                save_invites(invites)
+                invite_url = f"{BASE_URL}/admin/accept-invite?token={new_token}"
+                html = f"""
+                <p>Hi {username},</p>
+                <p>Your invite to the Feedback Widget admin panel has been refreshed.</p>
+                <p><a href="{invite_url}">Click here to create your account</a></p>
+                <p>This link expires in 7 days.</p>
+                """
+                await _send_email("Your Feedback Widget invite", html, to=invite["email"])
     # Always return the same response to avoid username enumeration
     return {"ok": True}
 
@@ -734,8 +783,8 @@ async def admin_ui():
   <div class="card">
     <h2>Team Members</h2>
     <table>
-      <thead><tr><th>Username</th><th></th></tr></thead>
-      <tbody id="users-tbody"><tr><td class="empty" colspan="2">Loading…</td></tr></tbody>
+      <thead><tr><th>Username</th><th>Email</th><th></th></tr></thead>
+      <tbody id="users-tbody"><tr><td class="empty" colspan="3">Loading…</td></tr></tbody>
     </table>
 
     <div style="margin-top:20px;border-top:1px solid #f3f4f6;padding-top:20px">
@@ -897,17 +946,37 @@ function loadUsers() {
 function renderUsers(users) {
   const tbody = document.getElementById('users-tbody');
   if (!users.length) {
-    tbody.innerHTML = '<tr><td class="empty" colspan="2">No team members yet.</td></tr>';
+    tbody.innerHTML = '<tr><td class="empty" colspan="3">No team members yet.</td></tr>';
     return;
   }
-  tbody.innerHTML = users.map(u => `
+  tbody.innerHTML = users.map(u => {
+    const emailCell = u.email
+      ? `<span style="color:#374151">${u.email}</span>`
+      : `<span style="color:#dc2626;font-size:12px">no email — <a href="javascript:void(0)" onclick="editEmail('${u.username}')" style="color:#2563eb">add one</a></span>`;
+    return `
     <tr>
-      <td>${u}</td>
+      <td>${u.username}</td>
+      <td>${emailCell}</td>
       <td style="text-align:right"><div class="actions" style="justify-content:flex-end">
-        <button class="btn btn-sm btn-secondary" onclick="resetUser('${u}', this)">Reset Password</button>
-        <button class="btn btn-sm btn-danger" onclick="deleteUser('${u}')">Remove</button>
+        ${u.email ? `<button class="btn btn-sm btn-secondary" onclick="editEmail('${u.username}')">Edit Email</button>` : ''}
+        <button class="btn btn-sm btn-secondary" onclick="resetUser('${u.username}', this)" ${u.email ? '' : 'disabled title="Add an email first"'}>Reset Password</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Remove</button>
       </div></td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
+}
+
+function editEmail(username) {
+  const next = prompt('Email address for "' + username + '":', '');
+  if (!next) return;
+  fetch('/api/admin/users/' + username + '/email', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
+    body: JSON.stringify({ email: next.trim() })
+  })
+    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
+    .then(() => loadUsers())
+    .catch(msg => alert(msg || 'Failed to update email.'));
 }
 
 function resetUser(username, btn) {
