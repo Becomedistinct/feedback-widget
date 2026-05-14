@@ -715,9 +715,15 @@ async def admin_delete_site(site_id: str):
 # Admin UI
 # ---------------------------------------------------------------------------
 
+_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+}
+
+
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_ui():
-    return HTMLResponse("""<!DOCTYPE html>
+    return HTMLResponse(headers=_NO_CACHE_HEADERS, content="""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
