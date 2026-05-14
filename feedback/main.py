@@ -993,7 +993,7 @@ function renderUsers(users) {
 }
 
 function setPassword(username) {
-  const pw = prompt('Set a new password for "' + username + '" (min 8 characters).\n\nShare this with them so they can sign in. They can change it later via Forgot Password.', '');
+  const pw = prompt('Set a new password for "' + username + '" (min 8 characters). Share it with them privately — they can change it later via Forgot Password.', '');
   if (pw === null) return;
   if (pw.trim().length < 8) { alert('Password must be at least 8 characters.'); return; }
   fetch('/api/admin/users/' + username + '/password', {
