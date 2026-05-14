@@ -207,6 +207,25 @@ async def admin_list_users():
     ]}
 
 
+@app.put("/api/admin/users/{username}/password", dependencies=[Depends(require_admin)])
+async def admin_set_user_password(username: str, request: Request):
+    body = await request.json()
+    password = str(body.get("password", "")).strip()
+    if len(password) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    users = load_users()
+    entry = users.get(username)
+    if entry is None:
+        raise HTTPException(404, "user not found")
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    if isinstance(entry, str):
+        users[username] = hashed
+    else:
+        entry["hash"] = hashed
+    save_users(users)
+    return {"ok": True}
+
+
 @app.put("/api/admin/users/{username}/email", dependencies=[Depends(require_admin)])
 async def admin_set_user_email(username: str, request: Request):
     body = await request.json()
@@ -957,13 +976,28 @@ function renderUsers(users) {
     <tr>
       <td>${u.username}</td>
       <td>${emailCell}</td>
-      <td style="text-align:right"><div class="actions" style="justify-content:flex-end">
+      <td style="text-align:right"><div class="actions" style="justify-content:flex-end;flex-wrap:wrap">
         ${u.email ? `<button class="btn btn-sm btn-secondary" onclick="editEmail('${u.username}')">Edit Email</button>` : ''}
-        <button class="btn btn-sm btn-secondary" onclick="resetUser('${u.username}', this)" ${u.email ? '' : 'disabled title="Add an email first"'}>Reset Password</button>
+        <button class="btn btn-sm btn-secondary" onclick="setPassword('${u.username}')">Set Password</button>
+        <button class="btn btn-sm btn-secondary" onclick="resetUser('${u.username}', this)" ${u.email ? '' : 'disabled title="Add an email first"'}>Email Reset Link</button>
         <button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Remove</button>
       </div></td>
     </tr>`;
   }).join('');
+}
+
+function setPassword(username) {
+  const pw = prompt('Set a new password for "' + username + '" (min 8 characters).\n\nShare this with them so they can sign in. They can change it later via Forgot Password.', '');
+  if (pw === null) return;
+  if (pw.trim().length < 8) { alert('Password must be at least 8 characters.'); return; }
+  fetch('/api/admin/users/' + username + '/password', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
+    body: JSON.stringify({ password: pw.trim() })
+  })
+    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail)))
+    .then(() => alert('Password set for ' + username + '. Share it with them privately.'))
+    .catch(msg => alert(msg || 'Failed to set password.'));
 }
 
 function editEmail(username) {
